@@ -56,6 +56,8 @@ jobs:
 
       - name: Package iOS dictionary
         run: |
+          # Rust 缓存会把 target/ 下的词库目录还原成空壳，词库安装程序看到已有目录就拒绝覆盖，所以先清掉再装。
+          rm -rf target/resources
           mkdir -p target/resources
           resource_dir="$(cargo run --quiet -p msime-client-core --example install_resources -- target/resources)"
           bash platforms/ios/stage-resources.sh "$resource_dir"
@@ -136,6 +138,8 @@ jobs:
       - name: Build the device app (unsigned)
         run: |
           set -euo pipefail
+          # Rust 缓存会把 target/ 下的词库目录还原成空壳，词库安装程序看到已有目录就拒绝覆盖，所以先清掉再装。
+          rm -rf target/resources
           mkdir -p target/resources
           resource_dir="$(cargo run --quiet -p msime-client-core --example install_resources -- target/resources)"
           bash platforms/ios/build-app.sh "$resource_dir" device
