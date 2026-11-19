@@ -15,6 +15,7 @@ enum KeyboardLayoutPreference {
   static let glideTypingKey = "keyboard.gesture.glide"
   static let bilingualGlideKey = "keyboard.gesture.bilingualGlide"
   static let cursorSwipeKey = "keyboard.gesture.cursorSwipe"
+  static let backspaceSwipeSpeedKey = "keyboard.gesture.backspaceSwipeSpeed"
   static let spaceVoiceKey = "keyboard.gesture.spaceVoice"
   static let swipeSymbolsKey = "keyboard.gesture.swipeSymbols"
   static let swipeSymbolsDirectionKey = "keyboard.gesture.swipeSymbolsDirection"
@@ -229,6 +230,26 @@ enum KeyboardLayoutPreference {
     get { defaults.object(forKey: cursorSwipeKey) as? Bool ?? false }
     set { defaults.set(newValue, forKey: cursorSwipeKey) }
   }
+  /// 「滑动删除速度」：按住 ⌫ 往左滑删除时的快慢，1 到 10 档，档位越高越快。只存本机 App Group，不进共享文档、不随设置同步（与横滑光标一样）。
+  static let backspaceSwipeSpeedRange: ClosedRange<Int> = 1...10
+  static let backspaceSwipeSpeedDefault = 7
+  static var backspaceSwipeSpeed: Int {
+    get {
+      let stored = defaults.object(forKey: backspaceSwipeSpeedKey) as? Int ?? backspaceSwipeSpeedDefault
+      return min(max(stored, backspaceSwipeSpeedRange.lowerBound), backspaceSwipeSpeedRange.upperBound)
+    }
+    set {
+      defaults.set(min(max(newValue, backspaceSwipeSpeedRange.lowerBound), backspaceSwipeSpeedRange.upperBound),
+                   forKey: backspaceSwipeSpeedKey)
+    }
+  }
+  /// 某一档对应的每删一个要往左滑的距离（pt）：第 1 档 22pt，每高一档少 2pt，第 10 档 4pt；默认第 7 档 10pt。
+  static func backspaceSwipeStep(speed: Int) -> Double {
+    let level = min(max(speed, backspaceSwipeSpeedRange.lowerBound), backspaceSwipeSpeedRange.upperBound)
+    return Double(24 - 2 * level)
+  }
+  /// 键盘横滑删除实际用的每格距离。
+  static var backspaceSwipeStep: Double { backspaceSwipeStep(speed: backspaceSwipeSpeed) }
   /// 「长按空格语音输入」：在空格键上按住 450 ms 打开语音面板。默认开，与 Android 的 `platform.android.space_voice` 相同；只存在本机 App Group，不进共享文档，也不随设置同步。「语音输入」页的「长按空格说话」开关直接读写它；iOS 没有工具栏语音按钮。
   static var spaceVoice: Bool {
     get { defaults.object(forKey: spaceVoiceKey) as? Bool ?? true }

@@ -8113,7 +8113,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     return .text(context: context)
   }
 
-  /// 按住 ⌫ 横滑：往左每 `BackspaceSwipeDeletion.step` 删一个组码或一个字，不松手往右滑把刚删的按原样恢复，松手定下来。
+  /// 按住 ⌫ 横滑：往左每滑一格（`KeyboardLayoutPreference.backspaceSwipeStep`，设置里的「滑动删除速度」）删一个组码或一个字，不松手往右滑把刚删的按原样恢复，松手定下来。
   @objc private func handleBackspaceSwipe(_ pan: UIPanGestureRecognizer) {
     switch pan.state {
     case .began:
@@ -8127,7 +8127,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
         return
       }
       if case .text = unit { pairedPunctuation.clear() }
-      backspaceSwipe = BackspaceSwipeDeletion(unit: unit)
+      backspaceSwipe = BackspaceSwipeDeletion(unit: unit, step: KeyboardLayoutPreference.backspaceSwipeStep)
       if hapticsEnabled { hapticStrength.impact(keyFeedback) }
       applyBackspaceSwipe(to: pan.translation(in: view).x)
     case .changed:
@@ -8147,13 +8147,30 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     switch swipe.unit {
     case .composition:
       if change > 0 {
-        for _ in 0..<change {
+        // 一格删一个音节（与长按 ⌫ 连删相同）。一次跨好几格时只在最后画一次，中间不刷新候选，滑得快也不卡。
+        session.flushPendingCharacters()
+        flushDeferredInputSnapshot()
+        var current = lastEditingText
+        var last: MetasequoiaInputSnapshot?
+        for index in 0..<change {
           playInputClick(.backspace)
-          render(session.handleBackspace())
+          let snapshot = session.segmentBackspace()
+          swipe.recordRemoved(before: current, after: snapshot.editingText)
+          current = snapshot.editingText
+          last = snapshot
+          if current.isEmpty {
+            swipe.stop(at: before + index + 1)
+            break
+          }
         }
-      } else {
-        // 按原顺序重打删掉的码，组字连同候选回到删之前的样子。
-        for code in swipe.retyped(from: before, to: swipe.applied) { handleCharacter(String(code)) }
+        backspaceSwipe = swipe
+        if let last { render(last) }
+      } else if swipe.restorable {
+        // 按原顺序重打删掉的音节，组字连同候选回到删之前的样子。
+        for _ in 0..<(-change) {
+          guard let code = backspaceSwipe?.popRemovedCode() else { break }
+          for character in code { handleCharacter(String(character)) }
+        }
       }
     case .text:
       if change > 0 {
