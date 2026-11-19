@@ -388,6 +388,11 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private weak var letterDeleteKey: UIButton?
   /// 左侧 ⇧ 的宽度：手机上 44pt，iPad 上按设计稿为 1.4 个键宽。
   private var phoneShiftWidth: NSLayoutConstraint?
+  /// 手机键面第三排字母与第一排等宽的约束，以及 ⇧ 与 Z、M 与 ⌫ 之间填空隙的四段占位格（`makeLetterRow`）；iPad 键面停用、隐藏。
+  private var phoneThirdRowLetterWidth: NSLayoutConstraint?
+  private var phoneThirdRowSpacers: [KeyRoutingSpacer] = []
+  /// 第三排里后面不留键距的那几项：⇧、左边两段占位格、M、右边两段占位格，空隙全由占位格撑开。
+  private var phoneThirdRowTightViews: [UIView] = []
   private var tabletShiftWidth: NSLayoutConstraint?
   private weak var spaceButton: UIButton?
   private var cursorMovement = SpaceCursorMovement()
@@ -2099,7 +2104,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private func installSplitGaps(in root: UIStackView) {
     let rows = ([numberRowView as UIView?, symbolExtraRowView as UIView?].compactMap { $0 } + letterRowViews + symbolRowViews + symbolLayerRowViews).compactMap { $0 as? UIStackView }
     for row in rows {
-      let characterKeys = row.arrangedSubviews.filter { ($0 as? KeyboardKeyButton)?.isFunctionKey != true }
+      // 第三排 ⇧、⌫ 旁边撑空隙的占位格（`installPhoneThirdRowSpacers`）不是字符键，不参与中缝的位置。
+      let characterKeys = row.arrangedSubviews.filter { !($0 is KeyRoutingSpacer) && ($0 as? KeyboardKeyButton)?.isFunctionKey != true }
       guard !characterKeys.isEmpty else { continue }
       if row.distribution == .fillEqually {
         row.distribution = .fill
@@ -2367,13 +2373,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     nineKeyClosingButton = exclamation
     controls.addArrangedSubview(exclamation)
     nineKeyContainer.addArrangedSubview(controls)
-    // 符固定在第三排，运算符按同一排高滚动，避免五项挤在三排高度里。排高取右列的 ⌫：「右侧大回车」的数字层把这个 符 移到底行、在这里隐藏，它的排高约束因此略低于 required，隐藏时让给 stack view 的零高约束。
-    for button in operators.arrangedSubviews {
-      button.heightAnchor.constraint(equalTo: delete.heightAnchor).isActive = true
-    }
-    let symbolsHeight = symbols.heightAnchor.constraint(equalTo: delete.heightAnchor)
-    symbolsHeight.priority = .init(999)
-    symbolsHeight.isActive = true
+    // 左列各项（运算符、#+= 和 符）的高度在建左列时已按 `numberPadSidebarItemShare` 约束好，不再取右列 ⌫ 的排高。
     controls.widthAnchor.constraint(equalTo: sidebar.widthAnchor).isActive = true
     return nineKeyContainer
   }
@@ -3781,6 +3781,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       tabletShiftWidth = shift.widthAnchor.constraint(equalTo: keys[0].widthAnchor, multiplier: TabletLetterLayout.shiftWeight)
       NSLayoutConstraint.activate([shiftWidth, deleteWidth]
         + keys.dropFirst().map { $0.widthAnchor.constraint(equalTo: keys[0].widthAnchor) })
+      installPhoneThirdRowSpacers(in: row, shift: shift, letters: keys, delete: delete)
       // The iPad system keyboard ends this row with comma and full stop. They start hidden and
       // their widths sit below required so the stack view's own hiding constraint wins on phones.
       for ascii in [",", "."] {
@@ -3878,6 +3879,48 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
 
   /// 手机第三排字母上的 ⇧ 和 ⌫。
   private static let phoneLetterEdgeWidth: CGFloat = 44
+
+  /// 手机键面第三排的七个字母与第一排的字母等宽，与 iOS 系统键盘相同：⇧ 和 ⌫ 仍是 `phoneLetterEdgeWidth`，多出来的宽度不再摊进字母，而是变成 ⇧ 与 Z、M 与 ⌫ 之间的空隙。以前七个字母平分 ⇧、⌫ 之外的整段，390pt 宽的 iPhone 上比第一排宽约 7%。
+  ///
+  /// 每段空隙由两格透明占位（`KeyRoutingSpacer`）撑开，靠外的一格把触摸交给 ⇧ 或 ⌫，靠里的一格交给 Z 或 M，空隙里没有死区；占位格之间和两侧不留键距，空隙的宽度全由它们决定。四格等宽，宽度不小于 0：键盘窄到放不下时（字母等宽约束低于 required）字母让步，照旧平分。
+  private func installPhoneThirdRowSpacers(in row: UIStackView, shift: UIView, letters: [UIView], delete: UIControl) {
+    guard let first = letters.first, let last = letters.last else { return }
+    let spacers = (0..<4).map { _ in KeyRoutingSpacer() }
+    spacers[0].owner = shift as? UIControl
+    spacers[1].owner = first as? UIControl
+    spacers[2].owner = last as? UIControl
+    spacers[3].owner = delete
+    for spacer in spacers {
+      spacer.isAccessibilityElement = false
+      spacer.accessibilityIdentifier = "thirdRowSpacer"
+      spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+      spacer.setContentCompressionResistancePriority(.init(1), for: .horizontal)
+      spacer.widthAnchor.constraint(greaterThanOrEqualToConstant: 0).isActive = true
+    }
+    row.insertArrangedSubview(spacers[0], at: 1)
+    row.insertArrangedSubview(spacers[1], at: 2)
+    let deleteIndex = row.arrangedSubviews.firstIndex(of: delete) ?? row.arrangedSubviews.count
+    row.insertArrangedSubview(spacers[2], at: deleteIndex)
+    row.insertArrangedSubview(spacers[3], at: deleteIndex + 1)
+    NSLayoutConstraint.activate(spacers.dropFirst().map { $0.widthAnchor.constraint(equalTo: spacers[0].widthAnchor) })
+    if let firstRowLetter = letterButtons.first?.button, firstRowLetter !== first {
+      let match = first.widthAnchor.constraint(equalTo: firstRowLetter.widthAnchor)
+      match.priority = .init(999)
+      phoneThirdRowLetterWidth = match
+    }
+    phoneThirdRowSpacers = spacers
+    phoneThirdRowTightViews = [shift, spacers[0], spacers[1], last, spacers[2], spacers[3]]
+  }
+
+  /// 按键面形态启用或停用第三排的等宽字母和两段空隙：手机键面启用；iPad 键面这一排是 ⇧ | 七个字母 | ，。| ⇧，按 `TabletLetterLayout` 的比例排，占位格隐藏、键距照常。
+  private func applyPhoneThirdRowSpacing(tablet: Bool) {
+    if phoneThirdRowLetterWidth?.isActive != !tablet { phoneThirdRowLetterWidth?.isActive = !tablet }
+    for spacer in phoneThirdRowSpacers where spacer.isHidden != tablet { spacer.isHidden = tablet }
+    guard let row = phoneThirdRowSpacers.first?.superview as? UIStackView else { return }
+    for view in phoneThirdRowTightViews {
+      row.setCustomSpacing(tablet ? UIStackView.spacingUseDefault : 0, after: view)
+    }
+  }
 
   /// 设计稿的字母键面：手机 22pt，iPad 键盘 20pt，固定字号而不跟随动态字体，免得大字设置把字母挤出按键。
   static func letterFontSize(_ formFactor: KeyboardFormFactor) -> CGFloat { formFactor == .tablet ? 20 : 22 }
@@ -7852,6 +7895,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       tabletShiftWidth?.isActive = false
       phoneShiftWidth?.isActive = true
     }
+    applyPhoneThirdRowSpacing(tablet: tablet)
     // 14 键第三排两端的分词键和 ⌫ 跟着 26 键的 ⇧ 换宽度。
     for width in fourteenKeyEdgeWidths {
       if tablet {
