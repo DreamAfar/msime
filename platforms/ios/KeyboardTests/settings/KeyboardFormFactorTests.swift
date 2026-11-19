@@ -350,15 +350,16 @@ final class KeyboardFormFactorTests: XCTestCase {
     }
     XCTAssertEqual(try key("shiftButton", in: phone).bounds.width, 44, accuracy: 0.5)
     // 第三排字母与第一排等宽，⇧ 和 ⌫ 仍是 44pt，多出的宽度变成 ⇧ 与 Z、M 与 ⌫ 之间的空隙。
-    let q = try frame(letter("q", in: phone), in: phone)
-    let z = try frame(letter("z", in: phone), in: phone)
-    let m = try frame(letter("m", in: phone), in: phone)
-    XCTAssertEqual(z.width, q.width, accuracy: 0.5, "third-row letters match the first row")
+    let phoneQ = try frame(letter("q", in: phone), in: phone)
+    let phoneZ = try frame(letter("z", in: phone), in: phone)
+    let phoneM = try frame(letter("m", in: phone), in: phone)
+    XCTAssertEqual(phoneZ.width, phoneQ.width, accuracy: 0.5, "third-row letters match the first row")
     XCTAssertEqual(try key("letterDeleteKey", in: phone).bounds.width, 44, accuracy: 0.5)
-    let shift = try frame(key("shiftButton", in: phone), in: phone)
-    let delete = try frame(key("letterDeleteKey", in: phone), in: phone)
-    XCTAssertEqual(z.minX - shift.maxX, delete.minX - m.maxX, accuracy: 0.5, "the two gaps are equal")
-    XCTAssertGreaterThan(z.minX - shift.maxX, CGFloat(KeyboardLayoutPreference.keySpacing), "the gap is wider than a key gap")
+    let phoneShift = try frame(key("shiftButton", in: phone), in: phone)
+    let phoneDelete = try frame(key("letterDeleteKey", in: phone), in: phone)
+    XCTAssertEqual(phoneZ.minX - phoneShift.maxX, phoneDelete.minX - phoneM.maxX, accuracy: 0.5, "the two gaps are equal")
+    XCTAssertGreaterThan(phoneZ.minX - phoneShift.maxX, CGFloat(KeyboardLayoutPreference.keySpacing),
+                         "the gap is wider than a key gap")
   }
 
   /// Tab 在组字时对应桌面端的 `navigation.tab` 翻页，默认开。
