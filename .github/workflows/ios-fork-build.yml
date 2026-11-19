@@ -1,0 +1,94 @@
+name: iOS build (fork)
+
+# 只给个人 fork 用：上游的 ci-ios.yml 跑在上游组织的 Depot runner（depot-macos-26）上，
+# fork 里没有这种 runner，那边的 job 会一直排队。这里换成 GitHub 托管的 macos-26（公开仓库免费），
+# 用镜像默认的 Xcode，步骤照抄 ci-ios.yml 的 `iOS Simulator` job：打包词库、编译 Rust 宿主库、
+# 生成 Xcode 工程、跑 pr 范围的单元测试。不要把这个文件带进给上游的 PR。
+
+on:
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: "测试范围：pr（单元测试，默认）或 build（只编译不跑测试）"
+        required: false
+        default: pr
+        type: choice
+        options: [pr, build]
+
+concurrency:
+  group: ios-fork-build-${{ github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ios:
+    name: iOS Simulator (fork)
+    runs-on: macos-26
+    timeout-minutes: 240
+    env:
+      MSIME_IOS_SKIP_HANDWRITING: '1'
+      CARGO_INCREMENTAL: '0'
+      MSIME_TEST_SCOPE: pr
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with: {persist-credentials: false}
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun simctl list runtimes | grep -i ios || true
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ios-fork
+
+      - name: Install project generator
+        run: brew install xcodegen
+
+      - name: Package iOS dictionary
+        run: |
+          mkdir -p target/resources
+          resource_dir="$(cargo run --quiet -p msime-client-core --example install_resources -- target/resources)"
+          bash platforms/ios/stage-resources.sh "$resource_dir"
+
+      - name: Build the iOS host library
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-apple-ios-sim
+          bash platforms/ios/build-native.sh simulator
+          test -f target/ios/simulator/libmsime_host_api.a
+
+      - name: Generate Xcode project
+        run: |
+          mkdir -p build/ios
+          python3 scripts/fetch_voice_runtime.py --platform ios
+          xcodegen generate --spec platforms/ios/project.yml --project build/ios --project-root platforms/ios
+
+      - name: Build only
+        if: ${{ inputs.scope == 'build' }}
+        run: |
+          set -euo pipefail
+          xcodebuild build-for-testing \
+            -project build/ios/MSIMEClient.xcodeproj \
+            -scheme MSIMEClientTests \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build/ios-derived \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tail -n 300
+
+      - name: Test native iOS keyboard and settings
+        if: ${{ inputs.scope != 'build' }}
+        timeout-minutes: 180
+        run: bash platforms/ios/scripts/run_ui_tests.sh
+
+      - name: Upload iOS test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-test-results
+          path: build/ios-derived/Logs/Test/*.xcresult
+          retention-days: 7
+          if-no-files-found: ignore
