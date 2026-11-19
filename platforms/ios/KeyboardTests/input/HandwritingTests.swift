@@ -114,9 +114,9 @@ final class HandwritingTests: XCTestCase {
     XCTAssertEqual(InputSchemePreference.scheme, .handwriting)
     let controller = KeyboardViewController(); controller.loadViewIfNeeded()
     let writingHeight = KeyboardViewController.keyboardHeight(handwriting: true)
-    // 竖屏手写比其他布局高一排键（52pt）和一道排间距。
+    // 竖屏手写比其他布局高一排键（44pt）和一道排间距。
     XCTAssertEqual(writingHeight - KeyboardViewController.defaultKeyboardHeight,
-                   52 + CGFloat(KeyboardLayoutPreference.rowSpacing), accuracy: 0.5)
+                   KeyboardHeightPercent.portraitKeyHeight(tablet: false) + CGFloat(KeyboardLayoutPreference.rowSpacing), accuracy: 0.5)
     for width in [320.0, 414.0] {
       let height = try XCTUnwrap(controller.view.constraints.first { $0.identifier == "keyboardHeight" })
       XCTAssertEqual(height.constant, writingHeight)

@@ -2146,8 +2146,8 @@ final class KeyLayoutStyleTests: XCTestCase {
       func titles() -> [String?] { stack.arrangedSubviews.map { ($0 as? UIButton)?.configuration?.title } }
       XCTAssertEqual(titles(), ["=", "%", "(", ")", "（）", "#+="], label)
       XCTAssertEqual(stack.arrangedSubviews.last?.accessibilityIdentifier, "numberPadMoreSymbols", label)
-      let delete = try button("nineKeyDelete", in: controller)
-      for key in stack.arrangedSubviews { XCTAssertEqual(key.bounds.height, delete.bounds.height, accuracy: 0.5, label) }
+      let itemHeight = try view("nineKeySidebar", in: controller).bounds.height * KeyboardViewController.numberPadSidebarItemShare
+      for key in stack.arrangedSubviews { XCTAssertEqual(key.bounds.height, itemHeight, accuracy: 0.5, label) }
       XCTAssertEqual(try button("numberPadSidebarSymbol0", in: controller).accessibilityLabel, "符号 =", label)
       XCTAssertTrue(shown(try button("numberPadSidebarSymbol0", in: controller)), label)
       try await restyle(controller, TouchKeyLayoutStyle(), label) { titles().first == "+" }
@@ -2292,13 +2292,13 @@ final class KeyLayoutStyleTests: XCTestCase {
       return controller
     }
 
-    // 英文：运算符之后接上 8 个半角符号，#+= 仍在最后；每一项与右列的 ⌫ 同高。
+    // 英文：运算符之后接上 8 个半角符号，#+= 仍在最后；每一项占左列高度的 `numberPadSidebarItemShare`。
     var controller = try openNumberPad(english: true)
     XCTAssertEqual(try titles(controller), ["+", "-", "*", "/"] + extras + ["#+="])
-    let delete = try button("nineKeyDelete", in: controller)
+    let itemHeight = try view("nineKeySidebar", in: controller).bounds.height * KeyboardViewController.numberPadSidebarItemShare
     for symbol in extras {
       let key = try XCTUnwrap(descendants(controller.view).first { $0.accessibilityLabel == "符号 \(symbol)" } as? UIButton, symbol)
-      XCTAssertEqual(key.bounds.height, delete.bounds.height, accuracy: 0.5, symbol)
+      XCTAssertEqual(key.bounds.height, itemHeight, accuracy: 0.5, symbol)
       key.sendActions(for: .primaryActionTriggered)
     }
     XCTAssertEqual(document.text, extras.joined(), "typed as drawn, half-width")

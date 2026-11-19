@@ -393,6 +393,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private var phoneThirdRowSpacers: [KeyRoutingSpacer] = []
   /// 第三排里后面不留键距的那几项：⇧、左边两段占位格、M、右边两段占位格，空隙全由占位格撑开。
   private var phoneThirdRowTightViews: [UIView] = []
+  /// 第三排只在 iPad 键面显示的 ，。 和右 ⇧ 的宽度约束（按字母宽的倍数）。手机键面上这些键隐藏、宽度为 0，约束若仍生效，会把可伸缩空隙旁的字母一起往 0 拉，所以只在 iPad 键面启用（`applyPhoneThirdRowSpacing`）。
+  private var tabletThirdRowWidths: [NSLayoutConstraint] = []
   private var tabletShiftWidth: NSLayoutConstraint?
   private weak var spaceButton: UIButton?
   private var cursorMovement = SpaceCursorMovement()
@@ -3797,7 +3799,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
         row.insertArrangedSubview(key, at: row.arrangedSubviews.count - 1)
         let width = key.widthAnchor.constraint(equalTo: keys[0].widthAnchor)
         width.priority = .init(999)
-        width.isActive = true
+        tabletThirdRowWidths.append(width)
       }
       // iPad 键盘在 ，。 之后的第二个 ⇧，手机在这个位置是 ⌫。两个 Shift 是同一个键。
       let rightShift = makeIconKey(Self.shiftIcon, accessibilityLabel: "大写") { [weak self] in
@@ -3810,7 +3812,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       row.addArrangedSubview(rightShift)
       let rightShiftWidth = rightShift.widthAnchor.constraint(equalTo: keys[0].widthAnchor, multiplier: TabletLetterLayout.shiftWeight)
       rightShiftWidth.priority = .init(999)
-      rightShiftWidth.isActive = true
+      tabletThirdRowWidths.append(rightShiftWidth)
     }
     if letters == letterRows[0] {
       // iPad 键盘的 ⌫ 在第一排末尾；手机仍放在第三排。
@@ -3914,7 +3916,14 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
 
   /// 按键面形态启用或停用第三排的等宽字母和两段空隙：手机键面启用；iPad 键面这一排是 ⇧ | 七个字母 | ，。| ⇧，按 `TabletLetterLayout` 的比例排，占位格隐藏、键距照常。
   private func applyPhoneThirdRowSpacing(tablet: Bool) {
-    if phoneThirdRowLetterWidth?.isActive != !tablet { phoneThirdRowLetterWidth?.isActive = !tablet }
+    // 先停用不属于这种键面的约束，再启用属于它的。
+    if tablet {
+      phoneThirdRowLetterWidth?.isActive = false
+      NSLayoutConstraint.activate(tabletThirdRowWidths)
+    } else {
+      NSLayoutConstraint.deactivate(tabletThirdRowWidths)
+      phoneThirdRowLetterWidth?.isActive = true
+    }
     for spacer in phoneThirdRowSpacers where spacer.isHidden != tablet { spacer.isHidden = tablet }
     guard let row = phoneThirdRowSpacers.first?.superview as? UIStackView else { return }
     for view in phoneThirdRowTightViews {

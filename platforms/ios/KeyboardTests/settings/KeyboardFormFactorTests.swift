@@ -100,7 +100,8 @@ final class KeyboardFormFactorTests: XCTestCase {
     XCTAssertEqual(phone.strip.minY, 2, accuracy: 0.5)
     XCTAssertEqual(phone.strip.minX, 3, accuracy: 0.5)
     XCTAssertEqual(phone.strip.maxX, 393 - 3, accuracy: 0.5)
-    XCTAssertEqual(phone.space.maxY, phone.height - 20, accuracy: 0.5)
+    // 键区上下不再垫补偿留白，底行紧贴下内边距。
+    XCTAssertEqual(phone.space.maxY, phone.height - KeyboardFormFactor.phone.padding.bottom, accuracy: 0.5)
     let withRow = try layout(tablet: true, width: 820)
     XCTAssertEqual(withRow.key.height, 54, accuracy: 0.5)
     XCTAssertEqual(withRow.strip.minX, 8, accuracy: 0.5)

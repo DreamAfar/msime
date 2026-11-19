@@ -97,7 +97,11 @@ final class MorePanelFoldTests: XCTestCase {
       let visible = scroll.convert(scroll.bounds, to: panel)
       XCTAssertTrue(visible.contains(tile.convert(tile.bounds, to: panel).insetBy(dx: 1, dy: 1)), tile.tool.title)
     }
-    for tile in tiles { XCTAssertEqual(tile.bounds.height, KeyboardFunctionTileView.height, accuracy: 0.5) }
+    // 手机竖屏的键区按 44pt 键帽算，默认高度下三行图块按 `pickerLayout` 略微等比缩小（约 50pt），各格一样高，不小于 44pt。
+    let tileHeight = tiles.first?.bounds.height ?? 0
+    for tile in tiles { XCTAssertEqual(tile.bounds.height, tileHeight, accuracy: 0.5) }
+    XCTAssertGreaterThanOrEqual(tileHeight, KeyboardPagedGridView.pickerMinTileHeight - 0.5)
+    XCTAssertLessThanOrEqual(tileHeight, KeyboardFunctionTileView.height + 0.5)
     XCTAssertEqual(KeyboardFunctionTileView.height, 52)
   }
 
@@ -671,8 +675,8 @@ final class MorePanelFoldTests: XCTestCase {
   }
 
   func testHeightPercentRoundTripsThroughPoints() {
-    let keyBlock = KeyboardViewController.keyBlockHeight(keyHeight: 52, rows: 4, rowSpacing: 7)
-    XCTAssertEqual(keyBlock, 229, "四排 52pt 手机按键与三个 7pt 行间距")
+    let keyBlock = KeyboardViewController.keyBlockHeight(keyHeight: 44, rows: 4, rowSpacing: 7)
+    XCTAssertEqual(keyBlock, 197, "四排 44pt 手机按键与三个 7pt 行间距")
     XCTAssertEqual(KeyboardHeightPercent.portraitKeyBlockHeight(tablet: false, numberRow: true, rowSpacing: 7), keyBlock,
                    "a phone has no digit row")
     XCTAssertEqual(KeyboardHeightPercent.portraitKeyBlockHeight(tablet: true, numberRow: true, rowSpacing: 7), 5 * 54 + 4 * 7)
