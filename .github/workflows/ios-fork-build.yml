@@ -6,6 +6,10 @@ name: iOS build (fork)
 # 生成 Xcode 工程、跑 pr 范围的单元测试。不要把这个文件带进给上游的 PR。
 
 on:
+  # 推到 ios- 开头的分支就自动构建。手动触发（workflow_dispatch）只认默认分支上的 workflow 文件，
+  # fork 的默认分支 develop 上没有这个文件，Actions 页就找不到它，所以靠推送来触发。
+  push:
+    branches: ['ios-*']
   workflow_dispatch:
     inputs:
       scope:
