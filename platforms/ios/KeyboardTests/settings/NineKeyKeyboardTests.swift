@@ -942,8 +942,8 @@ final class NineKeyKeyboardTests: XCTestCase {
     for id in ["symbolLayerToggle", "symbolLayerDeleteKey"] {
       XCTAssertEqual(try button(id, in: controller).bounds.width, mark.bounds.width * SymbolLayerLayout.edgeWeight, accuracy: 0.5, id)
     }
-    XCTAssertEqual(try button("symbolLayerKey0_0", in: controller).bounds.height, 52, accuracy: 0.5)
-    XCTAssertEqual(try button("returnKey", in: controller).bounds.height, 52, accuracy: 0.5)
+    XCTAssertEqual(try button("symbolLayerKey0_0", in: controller).bounds.height, 44, accuracy: 0.5)
+    XCTAssertEqual(try button("returnKey", in: controller).bounds.height, 44, accuracy: 0.5)
     XCTAssertTrue(try button("symbolDeleteKey", in: controller).isHidden, "⌫ is in the layer's third row")
     XCTAssertEqual(controller.view.constraints.first { $0.identifier == "keyboardHeight" }?.constant,
                    KeyboardViewController.defaultKeyboardHeight, "符号层沿用原来的行距和按键高度")
@@ -1548,8 +1548,8 @@ final class NineKeyKeyboardTests: XCTestCase {
       let letter = try XCTUnwrap(descendants(controller.view).first { $0.accessibilityLabel == "字母 Q" } as? UIButton)
       XCTAssertEqual(frame(letter).minY, gridTop, accuracy: 0.5, "\(scheme)")
       XCTAssertEqual(frame(try button("returnKey", in: controller)).maxY, nineKeyBottom, accuracy: 0.5, "\(scheme)")
-      // 四排 52pt 键帽、7pt 排距的高度由四排字母键和 11pt 排距填满。
-      XCTAssertEqual(letter.bounds.height, 52, accuracy: 0.5, "\(scheme)")
+      // 九键和英文 26 键同为四排 44pt 键帽，切过去按键区不跳。
+      XCTAssertEqual(letter.bounds.height, 44, accuracy: 0.5, "\(scheme)")
     }
   }
 

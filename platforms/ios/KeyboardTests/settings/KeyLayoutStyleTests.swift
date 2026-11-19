@@ -232,12 +232,12 @@ final class KeyLayoutStyleTests: XCTestCase {
     XCTAssertEqual(phone.keyRows(numberRow: false, phoneNumberRow: true), 5)
     XCTAssertEqual(phone.keyRows(numberRow: true), 4)
     XCTAssertEqual(KeyboardFormFactor.tablet.keyRows(numberRow: false, phoneNumberRow: true), 4)
-    // 2 + 50 + 4 + 5 × 52 + 4 × 7 + 4。
-    XCTAssertEqual(phone.keyboardHeight(topRow: 50, rowSpacing: 7, landscape: false, handwriting: false, phoneNumberRow: true), 348)
+    // 2 + 50 + 4 + 5 × 44 + 4 × 7 + 4。
+    XCTAssertEqual(phone.keyboardHeight(topRow: 50, rowSpacing: 7, landscape: false, handwriting: false, phoneNumberRow: true), 308)
     XCTAssertEqual(phone.keyboardHeight(topRow: 50, rowSpacing: 11, landscape: false, handwriting: false, letterKeys: true,
-                                        phoneNumberRow: true), 364)
+                                        phoneNumberRow: true), 324)
     XCTAssertEqual(KeyboardHeightPercent.portraitKeyBlockHeight(tablet: false, numberRow: false, rowSpacing: 7, phoneNumberRow: true),
-                   5 * 52 + 4 * 7)
+                   5 * 44 + 4 * 7)
   }
 
   // MARK: - 键盘
@@ -596,13 +596,12 @@ final class KeyLayoutStyleTests: XCTestCase {
         // 字母键仍是 44pt：多出的留白按五排重算。
         let letter = try XCTUnwrap(descendants(controller.view).first { $0.accessibilityLabel == "字母 Q" })
         XCTAssertEqual(letter.bounds.height, 44, accuracy: 0.5)
-        // 省下的高度不再整块垫在顶栏和数字行之间：数字行离顶栏是顶栏间隔加 4pt，数字行和 Q 之间是加宽后的排间距。
+        // 键区上下不垫留白：数字行紧接顶栏间隔，数字行和 Q 之间是排间距。
         let strip = try XCTUnwrap(descendants(controller.view).first { $0.accessibilityIdentifier == "candidateStrip" })
         let digit = try button("numberRowKey1", in: controller)
         func frame(_ view: UIView) -> CGRect { view.convert(view.bounds, to: controller.view) }
         XCTAssertEqual(frame(digit).minY - frame(strip).maxY,
-                       KeyboardFormFactor.phone.topRowGap
-                         + KeyboardFormFactor.phoneLetterVerticalPadding(rows: 5), accuracy: 0.5)
+                       KeyboardFormFactor.phone.topRowGap, accuracy: 0.5)
         XCTAssertEqual(frame(letter).minY - frame(digit).maxY,
                        CGFloat(KeyboardLayoutPreference.rowSpacing), accuracy: 0.5)
         attach(controller, "26 键 数字行")
@@ -1676,8 +1675,13 @@ final class KeyLayoutStyleTests: XCTestCase {
     try button("layoutToggleButton", in: controller).sendActions(for: .primaryActionTriggered)
     try layoutAtRequestedHeight(controller)
     XCTAssertTrue(shown(try button("numberPadSymbolPanelKey", in: controller)))
+    // 左列五项等高排满：+ - * / 和 符 一屏都看得到。
+    let sidebarHeight = try view("nineKeySidebar", in: controller).bounds.height
     XCTAssertEqual(try button("numberPadSymbolPanelKey", in: controller).bounds.height,
-                   try button("nineKeyDelete", in: controller).bounds.height, accuracy: 0.5)
+                   sidebarHeight * KeyboardViewController.numberPadSidebarItemShare, accuracy: 0.5)
+    let operators = try view("numberPadOperatorScroll", in: controller)
+    XCTAssertGreaterThanOrEqual(operators.bounds.height + 0.5,
+                                4 * sidebarHeight * KeyboardViewController.numberPadSidebarItemShare, "four operators fit")
     XCTAssertFalse(shown(try button("symbolPanelKey", in: controller)))
     controller.viewDidDisappear(false)
     // 全拼借用的数字九宫格。
