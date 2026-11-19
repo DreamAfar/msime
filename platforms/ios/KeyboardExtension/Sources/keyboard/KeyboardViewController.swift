@@ -2546,19 +2546,22 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   enum NineKeyMiddleKey: Equatable {
     /// 拼音网格：音节分隔符 `'`，只定音节在哪里结束，不定它的拼写。
     case separator
-    /// 网格的数字层：句点，用于小数和版本号。
+    /// 网格的数字层、底行没有句点键时：句点，用于小数和版本号。
     case period
+    /// 网格的数字层、底行的 中/英 键已改作句点键时（`languageKeyTypesPeriod`）：等号。
+    case equals
     /// 笔画键：丢掉已输入的笔画（即 Android 那里的重输）。
     case rewrite
 
-    static func resolve(stroke: Bool, digits: Bool) -> NineKeyMiddleKey {
-      stroke ? .rewrite : digits ? .period : .separator
+    static func resolve(stroke: Bool, digits: Bool, periodOnLanguageKey: Bool = false) -> NineKeyMiddleKey {
+      stroke ? .rewrite : digits ? (periodOnLanguageKey ? .equals : .period) : .separator
     }
 
     var face: String {
       switch self {
       case .separator: return "分词"
       case .period: return "."
+      case .equals: return "="
       case .rewrite: return "重输"
       }
     }
@@ -2567,13 +2570,14 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       switch self {
       case .separator: return "拼音分词"
       case .period: return "句点"
+      case .equals: return "等号"
       case .rewrite: return "重新输入笔画"
       }
     }
   }
 
   private var nineKeyMiddleKey: NineKeyMiddleKey {
-    NineKeyMiddleKey.resolve(stroke: typesStroke && !showsSymbols, digits: showsSymbols)
+    NineKeyMiddleKey.resolve(stroke: typesStroke && !showsSymbols, digits: showsSymbols, periodOnLanguageKey: languageKeyTypesPeriod)
   }
 
   private func updateNineKeyMiddleKey() {
@@ -2581,6 +2585,22 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     let key = nineKeyMiddleKey
     if button.configuration?.title != key.face { button.configuration?.title = key.face }
     button.accessibilityLabel = key.accessibilityLabel
+  }
+
+  /// 数字九宫格上底行的 中/英 键改作句点键：按下写 .，右列中间键随之从 . 改成 =（`NineKeyMiddleKey.equals`）。中/英 键被隐藏（「隐藏中/英键」或布局本来不放）时不改，中间键仍是 .，数字页照样能输入小数点。离开数字九宫格恢复语言键面。
+  private var languageKeyTypesPeriod: Bool { numberPadShown && bottomLanguageButton?.isHidden == false }
+
+  /// 按 `languageKeyTypesPeriod` 给 中/英 键换键面、读屏标签和字号；`updateLanguageModeButton` 先按语言画好，这里在数字九宫格上再盖成句点。
+  private func applyLanguageKeyFace() {
+    guard let button = bottomLanguageButton else { return }
+    let period = languageKeyTypesPeriod
+    let face = period ? "." : (isChineseMode ? Self.languageKeyTitle(inputScheme) : "英")
+    if button.configuration?.title != face {
+      button.configuration?.title = face
+      button.configuration?.titleTextAttributesTransformer = period ? Self.keyLabelTransformer : Self.functionLabelTransformer
+    }
+    button.accessibilityLabel = period ? "句点" : (isChineseMode ? "切换到英文输入" : "切换到所选输入方案")
+    button.accessibilityValue = period ? nil : (isChineseMode ? Self.languageKeyValue(inputScheme) : "英文输入")
   }
 
   /// 拼音网格的 1 键：候选条换成当前模式的常用标点（与 ， 长按的那一组相同），点选即上屏；组字中点选与按侧栏标点一样，先上屏首选再写标点。按其他键时 `render` 换回 Engine 的候选。
@@ -2598,6 +2618,9 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     case .period:
       countKeyPress(TypingKeyID.character("."))
       typeNumberPadText(".")
+    case .equals:
+      countKeyPress(TypingKeyID.character("="))
+      typeNumberPadText("=")
     case .rewrite:
       playInputClick()
       if hasComposition { render(discardComposition()) }
@@ -4424,12 +4447,14 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     row.addArrangedSubview(period)
     let language = makeKey(title: "中/英", accessibilityLabel: "切换中英文", function: true) { [weak self] in
       guard let self else { return }
+      // 数字九宫格上这个键是句点键（`languageKeyTypesPeriod`）：单切中英文在数字页上看不出变化，句点却常用。
+      if languageKeyTypesPeriod {
+        countKeyPress(TypingKeyID.character("."))
+        typeNumberPadText(".")
+        return
+      }
       countKeyPress(TypingKeyID.language)
-      // 数字九宫格上只有数字，单切中英文看不出变化（中/英 键像是没反应）：在这里按它就切换并回到字母层。
-      let leavesNumberPad = numberPadShown
-      if leavesNumberPad { showsSymbols = false }
       toggleInputMode()
-      if leavesNumberPad { updateLetterCaseControls() }
     }
     language.configuration?.contentInsets = .zero
     language.configuration?.titleTextAttributesTransformer = Self.functionLabelTransformer
@@ -7573,6 +7598,9 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       nineKeyZeroButton.isHidden = style != .nineKey || (!showsSymbols && inputScheme != .nineKeyShuangpin)
       let hidesLanguage = !layout.showsBottomLanguage
       bottomLanguageButton?.isHidden = style == .symbolLayer || hidesLanguage
+      // 中/英 键的显隐定下来之后，再定它在数字九宫格上是不是句点键，以及右列中间键是 . 还是 =。
+      applyLanguageKeyFace()
+      updateNineKeyMiddleKey()
       bottomLanguageWidth?.isActive = style == .standard && !hidesLanguage
       // iPad 的 26 键从第三排字母输入 ，。，所以它的底行没有自己的 ，。
       // 手机 26 键的逗号长按输入句号；14 键和手写保留两个标点键。

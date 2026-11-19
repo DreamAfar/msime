@@ -253,9 +253,12 @@ final class NineKeyKeyboardTests: XCTestCase {
     typealias Key = KeyboardViewController.NineKeyMiddleKey
     XCTAssertEqual(Key.resolve(stroke: false, digits: false), .separator)
     XCTAssertEqual(Key.resolve(stroke: false, digits: true), .period)
+    XCTAssertEqual(Key.resolve(stroke: false, digits: true, periodOnLanguageKey: true), .equals,
+                   "数字页底行的 中/英 键改作句点键时，中间键输入等号")
     XCTAssertEqual(Key.resolve(stroke: true, digits: false), .rewrite)
     XCTAssertEqual(Key.separator.face, "分词")
     XCTAssertEqual(Key.period.face, ".")
+    XCTAssertEqual(Key.equals.face, "=")
     XCTAssertEqual(Key.rewrite.face, "重输")
   }
 
@@ -301,8 +304,10 @@ final class NineKeyKeyboardTests: XCTestCase {
     }.isEmpty)
     XCTAssertTrue(try XCTUnwrap(descendants(controller.view).first { $0.accessibilityIdentifier == "symbolLayerRow0" }).isHidden,
                   "the grid keeps its digits instead of the 123 layer")
-    // 数字层上分词键没有可切分的内容；该键在那里输入句号。
-    XCTAssertEqual(try button("nineKeyMiddleKey", in: controller).configuration?.title, ".")
+    // 数字层上底行的 中/英 键改作句点键，分词键改输入等号。
+    XCTAssertEqual(try button("nineKeyMiddleKey", in: controller).configuration?.title, "=")
+    XCTAssertEqual(try button("bottomLanguageKey", in: controller).configuration?.title, ".")
+    XCTAssertEqual(try button("bottomLanguageKey", in: controller).accessibilityLabel, "句点")
     let zero = try button("nineKeyZero", in: controller)
     XCTAssertFalse(zero.isHidden)
     XCTAssertEqual(zero.configuration?.title, "0")
@@ -321,6 +326,7 @@ final class NineKeyKeyboardTests: XCTestCase {
     })
     XCTAssertTrue(controller.gestureRecognizerShouldBegin(hold))
     XCTAssertEqual(try button("nineKeyMiddleKey", in: controller).configuration?.title, "分词")
+    XCTAssertNotEqual(try button("bottomLanguageKey", in: controller).configuration?.title, ".", "回到字母层恢复语言键面")
   }
 
   func testLayoutPreferencePreservesActiveComposition() throws {
@@ -4785,7 +4791,8 @@ final class NineKeyKeyboardTests: XCTestCase {
       for symbol in extras {
         XCTAssertNotNil(descendants(operators).first { $0.accessibilityLabel == "符号 \(symbol)" }, "\(symbol) \(context)")
       }
-      XCTAssertEqual(try button("nineKeyMiddleKey", in: controller).configuration?.title, ".", context)
+      XCTAssertEqual(try button("nineKeyMiddleKey", in: controller).configuration?.title, "=", context)
+      XCTAssertEqual(try button("bottomLanguageKey", in: controller).configuration?.title, ".", context)
       XCTAssertEqual(try button("nineKeyClosingMark", in: controller).configuration?.title, closing, context)
       // 底行：0、空格和中/英都在，长空格的用户在这里也有空格。
       for id in ["nineKeyZero", "spaceKey", "bottomLanguageKey", "returnKey"] {
