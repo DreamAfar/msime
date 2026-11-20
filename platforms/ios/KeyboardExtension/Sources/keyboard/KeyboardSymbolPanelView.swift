@@ -265,8 +265,8 @@ final class KeyboardSymbolPanelView: UIView {
   required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
   private static let columns = 5
-  /// 底部「返回 | 搜索 | 锁定 | ⌫」一栏的高度。以前按面板高度的 20% 算，手机上约 46pt，比符号格还高，显得笨重；固定 36pt，省下的高度留给符号格。
-  static let bottomBarHeight: CGFloat = 36
+  /// 底部「返回 | 搜索 | 锁定 | ⌫」一栏的高度。以前按面板高度的 20% 算，手机上约 46pt，比符号格还高，显得笨重；固定 40pt，与左列类型按钮同高，省下的高度留给符号格。
+  static let bottomBarHeight: CGFloat = 40
   private static let rowHeight: CGFloat = 46
   private static let categoryHeight: CGFloat = 40
 

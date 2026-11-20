@@ -2171,7 +2171,8 @@ final class KeyLayoutStyleTests: XCTestCase {
     }
     try button("layoutToggleButton", in: controller).sendActions(for: .primaryActionTriggered)
     try layoutAtRequestedHeight(controller)
-    for id in ["nineKey1", "nineKeyMiddleKey", "nineKey5", "nineKeyZero"] {
+    // 小数点在底行的 中/英 键上（数字九宫格上它是句点键，右列中间键改输入 =）。
+    for id in ["nineKey1", "bottomLanguageKey", "nineKey5", "nineKeyZero"] {
       try button(id, in: controller).sendActions(for: .primaryActionTriggered)
     }
     try XCTUnwrap(descendants(controller.view).first { $0.accessibilityLabel == "运算符 +" && shown($0) } as? UIButton)
@@ -2182,6 +2183,8 @@ final class KeyLayoutStyleTests: XCTestCase {
     closing.sendActions(for: .primaryActionTriggered)
     XCTAssertTrue(document.text.hasPrefix("1.50+!"), document.text)
     XCTAssertFalse(document.text.contains("！"), document.text)
+    // 中/英 键在数字九宫格上是句点键，先回字母层再切回中文。
+    try button("layoutToggleButton", in: controller).sendActions(for: .primaryActionTriggered)
     try button("bottomLanguageKey", in: controller).sendActions(for: .primaryActionTriggered)
     controller.viewDidDisappear(false)
 
@@ -2303,12 +2306,12 @@ final class KeyLayoutStyleTests: XCTestCase {
     }
     XCTAssertEqual(document.text, extras.joined(), "typed as drawn, half-width")
     XCTAssertEqual(document.caretMoves, [], "the parentheses are typed one by one, the caret stays at the end")
-    // 切回中文，同一块数字九宫格的左列当场换回四个运算符。
+    // 切回中文：数字九宫格上 中/英 键是句点键，先回字母层切语言，再打开数字九宫格，左列换回四个运算符。
+    try button("layoutToggleButton", in: controller).sendActions(for: .primaryActionTriggered)
     try button("bottomLanguageKey", in: controller).sendActions(for: .primaryActionTriggered)
-    if !shown(try button("nineKey1", in: controller)) {
-      try button("layoutToggleButton", in: controller).sendActions(for: .primaryActionTriggered)
-    }
+    try button("layoutToggleButton", in: controller).sendActions(for: .primaryActionTriggered)
     try layoutAtRequestedHeight(controller)
+    XCTAssertTrue(shown(try button("nineKey1", in: controller)))
     XCTAssertEqual(try titles(controller), ["+", "-", "*", "/", "#+="], "Chinese adds nothing")
     controller.viewDidDisappear(false)
 
