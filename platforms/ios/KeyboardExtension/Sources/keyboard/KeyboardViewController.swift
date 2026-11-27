@@ -9427,7 +9427,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     let description = ([hintDescription, lines.isEmpty ? "" : "英文释义：\(lines.joined(separator: "，"))",
                         pronunciation.isEmpty ? "" : CandidatePronunciationModel.accessibilityLabel(pronunciation)])
       .filter { !$0.isEmpty }.joined(separator: "，")
-    return KeyboardCandidateAnnotation(text: text, accessibilityDescription: description)
+    // 系统样式的格子只有一行注释位，有译文时优先画这一行；编码提示和音标仍留在 `text` 里给卡片样式与读屏使用。
+    return KeyboardCandidateAnnotation(text: text, accessibilityDescription: description, gloss: lines.first ?? "")
   }
 
   private func synchronizeTranslationRoute() -> Bool {

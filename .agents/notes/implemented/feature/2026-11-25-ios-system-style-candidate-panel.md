@@ -28,6 +28,7 @@ iOS 的展开候选只有一个样子：64pt 起自动分列的按键式卡片�
 - 右列的删除键接上底部 ⌫ 的整套滑动手势：控制器在 `showCandidatePanel` 里建一个名字为 `backspaceSwipe` 的 pan 交给面板，面板挂到删除键上。于是横滑逐格删、上滑越过待命线松手清空、往右滑恢复都跟 ⌫ 一样，起手方向与能不能滑仍由 `gestureRecognizerShouldBegin` 和 `handleBackspaceSwipe` 原来那套判断，面板只提供按键。滑动期间 `candidatePanelFollowsSelection` 为真，候选换代时面板原地重建而不是收起（`handlePanelDeleteSwipe`）。
 - 候选栏可下滑展开：`candidateStrip` 上挂一个 pan（`candidateStripSwipeDown`），向下拖过 18pt 就调 `showCandidatePanel()`，等于点一下展开箭头。起手方向在 `gestureRecognizerShouldBegin` 里判（只接向下、纵向为主），与候选列表的横向滚动同时识别；`cancelsTouchesInView` 让手指落在某个候选上往下拖时不会同时把那个候选上屏。一次手势只展开一次。
 - 原地展开的卡片网格列宽下限放宽到 58pt（`inlineMinimumCellWidth`）：右边让出 44pt 的窄列之后，仍按 64pt 一排就只剩四列，一屏空得厉害（真机反馈）。375/390pt 恢复五列、430pt 六列、SE 的 320pt 仍是四列（五列每格五十来点，放不下两个字）。非原地展开的面板（标题栏、九键）不受影响。
+- 系统样式的译文不再靠抬高整行来争取空间：`span` 增加 `annotationWidth`，译文行（含内边距）比一列宽时那一格占两列，最多两列；`KeyboardCandidateAnnotation` 单存一份 `gloss`（控制器 `candidatePanelAnnotation` 里取译文第一行），系统样式的格子只有一行注释位，优先画译文，其次才是编码提示/音标。`cellHeight` 在系统样式下固定 46pt（上下留白从 6 收到 4，容得下候选行加一行译文），卡片样式仍按注释行数增高。
 
 ## Alternatives considered
 
@@ -35,6 +36,7 @@ iOS 的展开候选只有一个样子：64pt 起自动分列的按键式卡片�
 - 卡片样式也原地展开（两种样式统一，展开时上面不再多出一条重复的候选栏）：PR 最初这样做。审查（#11895）时撤回：卡片是缺省样式，原地展开会改掉现有用户的展开手感（上面那条候选栏和拼写不再保留，收起只能点右列箭头），按 AGENTS.md 出厂行为的变更要单独授权，这里没有。现在只有系统样式原地展开，卡片维持「候选条在上、网格在下」；要统一只需控制器里去掉 `panelStyle == .system` 这个条件，视图和 `inlineMinimumCellWidth` 都已就绪。
 - 继续按 `style` 推断布局（`style == .system` 时才原地展开）：改卡片样式时要把这个判断再翻一次，还会波及带标题栏的面板、九键三栏这类不传样式的调用方；改用显式 `expandsInPlace`，不传就是原来的布局，二十来个测试构造点一个都不用动。
 - 被盖住的候选条那一行可以铺一块不透明背景把它遮掉，而不是清空内容：原生皮肤下键盘底色几乎透明，再盖一层就比周围深一档，真机上能一眼看出展开前后不是同一个底。见上面 `panelCoversCompositionRow` 那一条。
+- 系统样式的长译文继续塞在一列里、任其尾部截断：中文解释只剩几个字，英文候选开了翻译等于没开。让整行按译文增高到 49pt 也不行：同排五个格子一起被抬高，与 46pt 的系统观感不一致，译文异步到达时还会上下跳。折中是那一格横向占两列、行高不动。
 
 ## 不做
 
@@ -50,10 +52,12 @@ iOS 的展开候选只有一个样子：64pt 起自动分列的按键式卡片�
 - 两条上游用例（`testCandidateChipsAndTheExpandChevron`、`testQuanpinKeepsTheFullCandidatePanel`）按缺省卡片样式跑，审查时随「卡片维持原样」恢复 develop 的预期。它们守的不是某个 bug，而是卡片样式的旧布局本身（网格在候选条下沿展开、面板里没有收起键）；既然缺省行为没变，断言也不该变，系统样式的原地展开改由 `CandidateTranslationTests` 直接构造 `expandsInPlace: true` 钉住。
 - 九键三栏面板、带标题栏的面板（`showsHeader: true`）行为不变：不传 `expandsInPlace`，顶边仍贴候选条下沿。
 - 面板里的删除仍没有长按连删，只有点按与滑动；需要时再补一条 `BackspaceRepeatTiming` 的转发。
+- 系统样式下一个格子可能因译文晚到而从一列变两列，同排后面的候选随之换行；但行高恒为 46pt，不会在译文到达时上下跳动。超过两列仍放不下的极长译文按尾部截断。
 
 ## Testing
 
-- `CandidateTranslationTests.testTheSystemStyleKeepsSixColumnsOnEveryPhoneWidth`：320/375pt 都是六列，卡片样式仍是 4/5 列；带注释的候选在六列下只占一列、卡片样式仍占两列。
+- `CandidateTranslationTests.testTheSystemStyleKeepsSixColumnsOnEveryPhoneWidth`：320/375pt 都是六列，卡片样式仍是 4/5 列；短注释在六列下只占一列、译文字宽超过一列时占两列且最多两列，卡片样式仍占两列。
+- `CandidateTranslationTests.testTheSystemStyleGivesALongGlossTwoColumnsWithoutRaisingTheRow`：系统样式下长中文译文那一格宽约两列，同一行候选等高且固定 46pt，格子里优先显示译文那一行。
 - `CandidateTranslationTests.testTheSystemStylePanelDrawsOneAlignedListWithTheSideColumn`：网格止于窄列左边，首行六格同一行且等宽，窄列里能找到收起、手写、删除三个按钮，系统样式不画标题栏。
 - `CandidateTranslationTests.testTheCardStyleSharesTheInPlaceLayoutAndKeepsItsOwnChips`：卡片样式展开后同样有窄列、窄列里三个按钮、网格止于窄列左边；375pt 上首行五格同一行、第六个候选换到第二行；卡片格子的底色与圆角跟不原地展开时一致（格子画法没被布局改动带掉），系统样式的格子仍是透明纯文字；没传 `expandsInPlace` 的面板不会凭空多出窄列。
 - `CandidateTranslationTests.testTheSystemStyleKeepsSixColumnsOnEveryPhoneWidth` 里也钉住了原地展开卡片的列数：窄列让出之后的 276/331/346/386pt 分别是 4/5/5/6 列。

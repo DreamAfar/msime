@@ -819,9 +819,13 @@ final class CandidateTranslationTests: XCTestCase {
     XCTAssertEqual(KeyboardCandidatePanelView.columns(width: 375), 5)
     XCTAssertEqual(KeyboardCandidatePanelView.columns(width: 320, style: .system), 6)
     XCTAssertEqual(KeyboardCandidatePanelView.columns(width: 375, style: .system), 6)
-    // 六列下注释不再把格子撑成两列，否则一页只放得下三个。
+    // 六列下短注释仍只占一列；长译文占两列，再长也不超过两列。卡片样式照旧把所有带注释的格子撑成两列。
     XCTAssertEqual(KeyboardCandidatePanelView.span(titleWidth: 30, annotated: true, columns: 6,
-                                                   columnWidth: 50, style: .system), 1)
+                                                   columnWidth: 50, annotationWidth: 40, style: .system), 1)
+    XCTAssertEqual(KeyboardCandidatePanelView.span(titleWidth: 30, annotated: true, columns: 6,
+                                                   columnWidth: 50, annotationWidth: 120, style: .system), 2)
+    XCTAssertEqual(KeyboardCandidatePanelView.span(titleWidth: 30, annotated: true, columns: 6,
+                                                   columnWidth: 50, annotationWidth: 400, style: .system), 2)
     XCTAssertEqual(KeyboardCandidatePanelView.span(titleWidth: 30, annotated: true, columns: 5,
                                                    columnWidth: 70), 2)
     // 原地展开的卡片网格右边让出了窄列，列宽下限放宽：375/390pt 五列、430pt 六列、320pt 四列。
@@ -863,6 +867,33 @@ final class CandidateTranslationTests: XCTestCase {
     }
     XCTAssertNil(descendants(panel).first { $0.accessibilityIdentifier == "candidatePanelSpelling" },
                  "系统样式不画标题栏，拼写留在候选条上")
+  }
+
+  /// 系统样式下英文候选的中文译文很长时，那一格占两列，但整行仍是 46pt。
+  func testTheSystemStyleGivesALongGlossTwoColumnsWithoutRaisingTheRow() throws {
+    let gloss = "这是一个很长的中文解释，用来验证系统样式下长译文只加宽不加高"
+    let annotations = [KeyboardCandidateAnnotation(text: gloss, accessibilityDescription: "释义", gloss: gloss)]
+      + Array(repeating: KeyboardCandidateAnnotation.none, count: 5)
+    let panel = KeyboardCandidatePanelView(
+      candidates: ["hello", "world", "test", "again", "other", "more"],
+      preedit: "hello", annotations: annotations,
+      display: { $0 }, onSelect: { _ in }, onClose: {},
+      style: .system, onHandwriting: {}, onDelete: {}, expandsInPlace: true)
+    panel.frame = CGRect(x: 0, y: 0, width: 375, height: 280)
+    panel.layoutIfNeeded()
+
+    func chip(_ number: Int) throws -> UIButton {
+      try XCTUnwrap(descendants(panel).first { $0.accessibilityIdentifier == "panelCandidate-\(number)" } as? UIButton)
+    }
+    let glossed = try chip(1)
+    let plain = try chip(2)
+    XCTAssertGreaterThan(glossed.bounds.width, plain.bounds.width * 1.8, "长译文那一格占两列")
+    XCTAssertEqual(glossed.bounds.height, KeyboardCandidatePanelView.systemCellHeight, accuracy: 0.5,
+                   "译文不能把整行撑高")
+    XCTAssertEqual(plain.bounds.height, glossed.bounds.height, accuracy: 0.5, "同一行的格子等高")
+    let title = try XCTUnwrap(glossed.configuration?.attributedTitle.map { String($0.characters) })
+    XCTAssertEqual(title.split(separator: "\n", omittingEmptySubsequences: false).map { String($0) },
+                   ["hello", gloss])
   }
 
   /// 卡片样式与系统样式共用原地展开的布局：右侧窄列、网格止于那一列；差别只在格子本身，卡片是按键式的面，系统样式只有文字。
