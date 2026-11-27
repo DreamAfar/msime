@@ -387,8 +387,40 @@ xcrun simctl launch booted app.msime.ios
 
 26 键的每个字母键上滑、下滑各是一个动作，两条配置互不影响。模型和存储在 SharedUI 的 `LetterSwipePreference`（`SharedUI/preferences/KeyboardLayoutPreference.swift`），键成本机 App Group 的 JSON `keyboard.gesture.letterSwipeBindings`，不随设置同步，与「滑动输入符号」一致。没单独配置过的方向按 `KeyboardLayoutPreference.swipeSymbolsDirection` 回落成该键的角标，另一边不接，所以升级后不动设置的人看到的仍是原来的行为；显式选「无」会存成一条 `none`，压住这个回落。
 
-动作有：无、角标符号、粘贴、复制选中文字、剪切选中文字、撤销、重做、全选、自定义文本、剪贴板历史、切换中英文、光标左移、光标右移。判定在 `KeyboardKeyButton`：14pt 阈值（`LetterSwipePolicy`，与角标同一个门槛），先过阈值的方向锁住这次触摸，预览气泡显示该方向的符号或动作名，松手才执行；长按仍是角标。总开关「滑动输入符号」关掉后两个方向都不接。
+动作有：无、角标符号、粘贴、复制选中文字、剪切选中文字、撤销、重做、全选、自定义文本、剪贴板历史、切换中英文、光标左移、光标右移、切换到 123 键盘、切换到 #+= 键盘、打开符号面板（符）、常用语。判定在 `KeyboardKeyButton`：14pt 阈值（`LetterSwipePolicy`，与角标同一个门槛），先过阈值的方向锁住这次触摸，预览气泡显示该方向的符号或动作短名（如「复制」，完整名字在按键宽的气泡里显示不下），松手才执行；长按仍是角标。总开关「滑动输入符号」关掉后两个方向都不接。
 
-限制：粘贴、复制、剪切要键盘有完全访问（读或写 `UIPasteboard`），没有时提示去打开；复制、剪切要先在输入框里选中文字，剪切在组字中不做；撤销、重做交给宿主的 `undoManager`，全选走宿主的 `selectAll:`，宿主没实现时提示，不静默失败；粘贴由键盘读剪贴板并插入，iOS 可能弹一次系统「允许粘贴」。光标移动按一个字符（`adjustTextPosition`）。
+切键盘的四个动作与对应的键走同一条路径：123 直接置数字九宫格层（`showKeyboardLayer(numberPad: true)`），#+= 直接置符号页（大千注音是共享符号行），符 打开分类符号面板，常用语打开常用语面板；都不按当前层取反。
+
+「全选」在 iOS 上没有公开接口，按四档依次尝试（`selectAllDocumentText`）：代理对象真实现了 `UITextInput` 时直接写 `selectedTextRange`；否则把 `selectAll:` 转给宿主；再不行对 500 字以内、且光标已在末尾的输入框做**组字重绘**（删掉正文，用 `setMarkedText` 写回并全选组字区，宿主会画成选中态，代价是撤销记录断在这里）；都失败时只把全文记进缓存，紧接着的复制、剪切用这份全文，用前先比对输入框里的文字还是不是同一份。落点决策在 `SelectAllPolicy`。
+
+字母键底部还能标出下滑动作的短名：「显示下滑动作提示」（`KeyboardLayoutPreference.letterSwipeHint`，只存本机 App Group，默认开）打开时，26 键字母键底部写这个键下滑会做什么，例如「复制」「123」「左移」。只有「滑动输入符号」开着、而且这个键的下滑真的做了别的动作时才画：「无」不画，角标也不画（符号已经画在右上角）。这一行和「双拼键位提示」共用底部同一个位置，双拼提示画出来时以它为准、下滑短名让位；手机横屏的键只有 34pt，仍只让下边距。开关在「键盘 → 手势」里，与「显示字母键角标」并排。
+
+限制：粘贴、复制、剪切要键盘有完全访问（读或写 `UIPasteboard`），没有时提示去打开；复制、剪切要先在输入框里选中文字，剪切在组字中不做；撤销、重做交给宿主的 `undoManager`；全选把宿主的 `selectAll:` 转过去，但 iOS 的自定义键盘指南写明选择文字由宿主 App 控制，键盘没有设置选区的公开接口，多数输入框不会响应，此时提示在输入框里长按选择，不静默失败；粘贴由键盘读剪贴板并插入，iOS 可能弹一次系统「允许粘贴」。光标移动按一个字符（`adjustTextPosition`）。
 
 设置入口在「键盘 → 布局 → 手势 → 字母键上下滑」：26 键逐行编辑，选「自定义文本」时就地输入，支持单键和全部恢复默认。判定与默认回落的用例在 `KeyboardTests/input/LetterCornerHintTests.swift`；设置页的 UI 用例尚未补。
+
+## 符号页输入后返回字母键盘
+
+「键盘 → 布局 → 返回主键盘符号」（共享偏好 `touch_return_to_letters_symbols`，随账号设置同步，只有 iOS 键盘读）里填一串符号，在「符」面板、`#+=` 页和数字页的补充行上写出其中任何一个之后，键盘自动回到字母层，不用再点「拼音」或 123。清单最多 12 个单字素，**留空就是关闭**：清空保存写的是空数组，不会回落成默认清单。
+
+测试阶段默认清单是 `，。？！、；：`（`default_return_to_letters_symbols`），装上就生效：未签名的测试包没有 App Group，设置页存的清单传不到键盘，键盘读不到这一项时用同一个清单兜底（`returnToLettersSymbolsTestingDefault`）。测试通过后两处一起改回空列表，并恢复字段上的 `skip_serializing_if`，就回到「没设置过的人行为不变」。
+
+判定在 `SymbolReturnPolicy`（`KeyboardLayoutTables.swift`），比较的是「送出的符号 + 它此刻画在键上的字」：`#+=` 页中文层画 `，`、送的却是 `,`，填哪个都能命中；中文标点关着时键面就是 `,`，这时只认 `,`，「符」面板上画 `，` 打出来是 `,` 的情况不会被误切。三个接点是 `typeSymbolLayerFace`、`makeSymbolRow`（大千的共享符号行）和 `showSymbolPanel` 的插入回调；命中且当前在符号页时走与底行「回到字母」键相同的路径（`showsSymbols = false` 加重排键面）。「符」面板的锁定（连续输入符号）不受影响，面板自己决定收不收。用例在 `KeyboardTests/settings/QuickPunctuationSettingsTests.swift`。
+
+## 底行按键的上滑、下滑
+
+空格、中/英、符、表情、回车、常用标点和句号键的上下滑各配一个动作（`BottomKeySwipePreference`，本机 App Group 的 `keyboard.gesture.bottomKeySwipeBindings`，不随账号同步）。默认只有**空格上滑上屏当前高亮候选的译文**，其余键与方向都是「无」，升级后手感不变；显式选「无」会存一条压住这个默认。123 / ABC（上滑已打开 `#+=`）、⌫（上滑清空）、地球键（交给系统切换键盘）不在这张表里；九键左列的「符」、九键大回车和 iPad 第二排的回车与底行对应键共用同一份配置。
+
+手势复用字母键的 `KeyboardKeyButton.swipeActions`（阈值 14pt、先过的方向锁住这次触摸），并要求纵向占优：空格左右拖移光标、标点键上横滑移光标都是横向手势，斜着滑不会被当成上下滑。空格自己的 pan 只在横向占优时开始，竖直滑动仍归按键判定。底行不跟「滑动输入符号」总开关——那个开关是字母角标的总闸。
+
+「上屏译文」取的是释义卡片的同一条值（第一目标语言的第一条义项，离线释义按分号拆条），没有组字、没有候选或还没有译文时什么也不做，不会拿候选原文顶替。设置入口是「键盘 → 手势 → 底行按键滑动」，每个键一行摘要，点开编辑（选项里没有「角标符号」，底行没有角标）。
+
+**测试阶段**在 `LetterSwipePreference.testingDefaults` 给 W / E / R / T 的下滑预置了 123 / #+= / 符 / 常用语，装包即可试四个切键盘动作（未签名包没有 App Group，设置页配的传不进键盘）。测试通过后删掉这个常量与 `configured`、`binding(letter:direction:)`、`binding(in:)`、`letterSwipeBinding` 里的引用即可。用例在 `KeyboardTests/input/LetterCornerHintTests.swift`（`testBottomKeySwipeDefaultsAndStoredBindings`、`testSpaceKeyCarriesTheTranslationSwipe`）。
+
+## 字母键长按弹出选项
+
+26 键字母键按住 0.5 秒弹出这个键能输入的字符，点一项上屏（`LetterHoldPreference`，本机 App Group 的 `keyboard.gesture.letterHoldOptions`；总开关 `keyboard.gesture.letterHoldOptionsEnabled`，默认开）。默认表对齐 Android 的 `EnglishLetterHoldPolicy` / `showLetterOptions`：中文给这个键的小写、大写、角标和 a/e/i/o/u 的四个声调（`e` → `e E 3 ē é ě è`），英文另给 `ê`、`v` 的 `üǖǘǚǜ`、`n/m` 的声调以及上下标；一个键最多 10 项，弹窗五列一行、最多两行，顶排键上方放不下就翻到键下方。
+
+三条边界：**组字中长按等同点按**（`KeyboardKeyButton.holdSuppressed` 读 `hasComposition`），否则选个字符会把拼音组字结束掉；**选中项按字面上屏**（先 `finishComposition` 再 `insertDirectText`），不经过拼音引擎；**总开关关掉或这个键存了空数组**时长按回到原来的「输入角标」，滑动出角标不受影响。逐键清单在「键盘 → 手势 → 长按弹出选项」（总开关），点上方预览图的字母键进入编辑页，可填自定义清单（单字素、去重、最多 10 项），留空保存就是这个键不弹，点「恢复默认」回到随语言变化的默认表。读屏没有长按，字母键另挂「显示长按选项」的自定义动作。
+
+弹窗复用九键长按菜单的 `showKeyHoldOptions`（`identifierPrefix` 为 `letterHoldOption`），`KeyboardHoldOptionsLayout` 先量高度再决定贴上还是贴下。用例在 `KeyboardTests/input/LetterCornerHintTests.swift`（`testLetterHoldDefaultsFollowTheLanguage`、`testLetterHoldOptionsStoreCustomListsAndEmptyMeansNoPopup`、`testLetterKeyLongPressShowsItsOptions`）。
