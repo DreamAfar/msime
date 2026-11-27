@@ -2507,36 +2507,41 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     }
   }
 
+  /// 数字层与字母层之间切换九键键面。被手指按过的按钮，UIKit 之后再套用 configuration 会给标题挂 0.25s
+  /// 的淡入淡出（`CATransition` fade）：切层时旧键面（ABC / JKL / TUV）还没淡出、新键面（2 / 5 / 8）已经淡入，
+  /// 叠成「ABC₂」闪一下（用户实测）。与候选条 #10330 同一处理：整段放进不带动画的块里，键面立即换成目标层的样子。
   private func applyNineKeyDigitLayer(_ digits: Bool) {
     let shuangpin = inputScheme == .nineKeyShuangpin
-    for key in nineKeyGridKeys {
-      if shuangpin {
-        let face = nineKeyShuangpinLayout?.keys.first { $0.key == String(key.digit) }
-        key.button.configuration?.title = String(key.digit)
-        key.button.configuration?.subtitle = digits ? nil : face?.compactHint
-        key.button.configuration?.subtitleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
-          var attributes = attributes
-          attributes.font = .systemFont(ofSize: 11)
-          return attributes
+    UIView.performWithoutAnimation {
+      for key in nineKeyGridKeys {
+        if shuangpin {
+          let face = nineKeyShuangpinLayout?.keys.first { $0.key == String(key.digit) }
+          key.button.configuration?.title = String(key.digit)
+          key.button.configuration?.subtitle = digits ? nil : face?.compactHint
+          key.button.configuration?.subtitleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
+            var attributes = attributes
+            attributes.font = .systemFont(ofSize: 11)
+            return attributes
+          }
+          key.button.accessibilityLabel = digits ? "数字 \(key.digit)" : (face?.accessibilityLabel ?? "数字 \(key.digit)")
+          key.button.accessibilityHint = nil
+          key.numberHint?.isHidden = true
+        } else {
+          key.button.configuration?.subtitle = nil
+          key.button.configuration?.title = digits ? String(key.digit) : (key.letters ?? Self.nineKeySymbolsFace)
+          key.button.accessibilityLabel = digits
+            ? "数字 \(key.digit)"
+            : (key.letters.map { "\(key.digit) \($0)" } ?? "1 符号")
+          key.numberHint?.isHidden = digits
+          key.button.accessibilityHint = digits ? nil
+            : (key.letters.map { "长按输入 \(key.digit) 或 \($0)" } ?? "长按输入 1")
         }
-        key.button.accessibilityLabel = digits ? "数字 \(key.digit)" : (face?.accessibilityLabel ?? "数字 \(key.digit)")
-        key.button.accessibilityHint = nil
-        key.numberHint?.isHidden = true
-      } else {
-        key.button.configuration?.subtitle = nil
-        key.button.configuration?.title = digits ? String(key.digit) : (key.letters ?? Self.nineKeySymbolsFace)
-        key.button.accessibilityLabel = digits
-          ? "数字 \(key.digit)"
-          : (key.letters.map { "\(key.digit) \($0)" } ?? "1 符号")
-        key.numberHint?.isHidden = digits
-        key.button.accessibilityHint = digits ? nil
-          : (key.letters.map { "长按输入 \(key.digit) 或 \($0)" } ?? "长按输入 1")
+        key.button.gestureRecognizers?.filter { $0.name == "nineKeyDigitHold" }.forEach { $0.isEnabled = !shuangpin && !digits }
       }
-      key.button.gestureRecognizers?.filter { $0.name == "nineKeyDigitHold" }.forEach { $0.isEnabled = !shuangpin && !digits }
+      let zero = nineKeyShuangpinLayout?.keys.first { $0.key == "0" }
+      nineKeyZeroButton?.configuration?.titleTextAttributesTransformer = digits ? Self.keyLabelTransformer : Self.functionLabelTransformer
+      nineKeyZeroButton?.accessibilityLabel = shuangpin && !digits ? (zero?.accessibilityLabel ?? "数字 0") : "数字 0"
     }
-    let zero = nineKeyShuangpinLayout?.keys.first { $0.key == "0" }
-    nineKeyZeroButton?.configuration?.titleTextAttributesTransformer = digits ? Self.keyLabelTransformer : Self.functionLabelTransformer
-    nineKeyZeroButton?.accessibilityLabel = shuangpin && !digits ? (zero?.accessibilityLabel ?? "数字 0") : "数字 0"
   }
 
   /// 九键「右侧大回车」的回车：从右列第三格（`nineKeyClosingButton` 让出的位置）一直伸到底行，两倍高、中间无缝。它不在任何一行里，而是叠在按键列上，按右列的左右边、第三格的上边和底行的下边约束；底行在它下面留出同宽的一格（`tallReturnSlot`）。外观和行为与底行的回车相同（`returnKeys`），按下记 `Return`。只在这个样式的九键外框上显示。
@@ -3108,6 +3113,9 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       hold.name = "toolbarEditorHold"
       hold.minimumPressDuration = Self.nineKeyHoldDuration
       hold.cancelsTouchesInView = true
+      // 长按靠按住时长判定，不依赖抬手；关掉 UIKit 默认的抬手延迟，快速点按才能立刻响应，
+      // 不必等长按判失败（品牌键上还叠着双击识别器，两个都扣抬手时单击会明显变慢）。
+      hold.delaysTouchesEnded = false
       button.addGestureRecognizer(hold)
       button.accessibilityCustomActions = [
         UIAccessibilityCustomAction(name: "编辑工具栏") { [weak self] _ in
@@ -3119,10 +3127,16 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
 
     // 双击品牌键看内存读数（`presentMemoryBubble`）：键盘里没有 Xcode 的内存仪表，诊断日志又写在未签名
     // 测试包拿不到的 App Group 里，这个气泡是唯一能在设备上直接读到占用、余量和峰值的地方。单击仍是功能菜单，
-    // 两者靠延时区分（见 `handleBrandTap`）；长按仍是编辑工具栏，不受影响。
+    // 长按仍是编辑工具栏；三者靠「点按次数 / 按住时长」区分，**不靠延时**——单击和长按都不该为等双击判定而变慢。
     let brandDoubleTap = UITapGestureRecognizer(target: self, action: #selector(handleBrandDoubleTap))
     brandDoubleTap.numberOfTapsRequired = 2
     brandDoubleTap.name = "brandDoubleTap"
+    // 关键：UIGestureRecognizer.delaysTouchesEnded 默认是 true，双击识别器会扣住品牌键的抬手
+    // （touchUpInside / primaryActionTriggered）直到双击窗口判定完，单击菜单因此慢两百多毫秒。
+    // 双击靠两次点按的间隔就能判定，不需要扣抬手；关掉后第一下立即开菜单，第二下由
+    // handleBrandDoubleTap 收掉菜单换气泡（cancelsTouchesInView 保证第二下不再触发按钮动作）。
+    brandDoubleTap.delaysTouchesEnded = false
+    brandDoubleTap.delaysTouchesBegan = false
     moreShortcut.addGestureRecognizer(brandDoubleTap)
     container.addSubview(shortcutBar)
     // 与候选行相同：顶栏收起时由隐藏的工具栏让步。
@@ -3178,7 +3192,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       setChinesePunctuation(!chinesePunctuation)
       updateShortcutButtons()
     }, for: .primaryActionTriggered)
-    // 单击开功能菜单，但要等双击判定过去；双击是内存读数气泡（`handleBrandDoubleTap`）。
+    // 单击立即开功能菜单，不为双击判定留延时；双击是内存读数气泡（`handleBrandDoubleTap`）。
     moreShortcut.addAction(UIAction { [weak self] _ in self?.handleBrandTap() }, for: .primaryActionTriggered)
     symbolsShortcut.addAction(UIAction { [weak self] _ in
       guard let self else { return }

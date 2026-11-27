@@ -175,15 +175,20 @@ final class KeyboardMemoryTests: XCTestCase {
     XCTAssertNil(timed.superview)
   }
 
-  /// 品牌键上挂着双击识别器，长按那条路（编辑工具栏）不受影响。
+  /// 品牌键上挂着双击识别器，长按那条路（编辑工具栏）不受影响。两个识别器都显式关掉 `delaysTouchesEnded`：
+  /// UIKit 默认是 true，会扣住按钮抬手等双击判定，单击菜单因此慢两百多毫秒（用户实测反馈）。
   func testBrandKeyCarriesTheDoubleTap() throws {
     let controller = KeyboardViewController()
     controller.loadViewIfNeeded()
     let logo = try XCTUnwrap(
       descendants(controller.view).first { $0.accessibilityIdentifier == "moreShortcut" })
-    let taps = (logo.gestureRecognizers ?? []).compactMap { $0 as? UITapGestureRecognizer }
-    XCTAssertTrue(taps.contains { $0.numberOfTapsRequired == 2 && $0.name == "brandDoubleTap" })
-    XCTAssertTrue((logo.gestureRecognizers ?? []).contains { $0.name == "toolbarEditorHold" })
+    let gestures = logo.gestureRecognizers ?? []
+    let taps = gestures.compactMap { $0 as? UITapGestureRecognizer }
+    let doubleTap = try XCTUnwrap(taps.first { $0.numberOfTapsRequired == 2 && $0.name == "brandDoubleTap" })
+    XCTAssertFalse(doubleTap.delaysTouchesEnded, "单击菜单不能等双击判定")
+    XCTAssertFalse(doubleTap.delaysTouchesBegan)
+    let hold = try XCTUnwrap(gestures.first { $0.name == "toolbarEditorHold" })
+    XCTAssertFalse(hold.delaysTouchesEnded, "长按也不能扣住单击的抬手")
   }
 
   // MARK: - 内存警告与组字
