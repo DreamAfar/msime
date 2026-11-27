@@ -185,6 +185,10 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private var glossCardDocument: UUID?
   private let moreShortcut = KeyboardBrandMarkButton()
   private var morePicker: KeyboardMorePickerView?
+  /// 双击品牌键弹出的内存读数气泡；存在即说明它盖在键盘上，点它外面或被键盘收走时消失。
+  private var memoryBubble: KeyboardMemoryBubble?
+  /// 双击已经认出来了，紧接着那一次按钮动作属于双击的第二下，不再当成单击去开功能菜单。
+  private var brandDoubleTapConsumedTap = false
   /// 输入方式或功能面板打开时是不是横屏；转屏后行数变了就关掉它（`closePickerBuiltForOtherOrientation`）。
   private var pickerLandscape = false
   /// 键盘调整：盖住整块键盘的遮罩和它的预览，只在打开期间存在。
@@ -1302,6 +1306,9 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     super.didReceiveMemoryWarning()
     DiagnosticLog.shared.write("memory_warning \(DiagnosticLog.MemorySample.current().fields)")
     // 收到警告后仍占着可选面板、释义结果或引擎候选缓存的键盘扩展很快会被系统结束。能重建的都丢掉，正在进行的组字和会话保留。
+    // 面板开着时收掉是对的（展开的候选网格最占内存），但要留个能看见的痕：不然用户看到的只是「点了展开，键区闪一下就回来」，
+    // 日志又只在 App Group 里、未签名的包读不到，这个现象就永远说不清是换代、是内存，还是别的。
+    let closedPicker = keyAreaPanel != nil
     closeKeyboardPicker()
     closeKeyboardService()
     handwriting.deactivate()
@@ -1329,6 +1336,11 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     candidatePalette = currentCandidatePalette()
     applyCandidateAppearance()
     DiagnosticLog.shared.write("memory_released engine_cache=\(engineCache) \(DiagnosticLog.MemorySample.current().fields)")
+    if closedPicker {
+      DiagnosticLog.shared.write("memory_warning_closed_picker")
+      showDiagnostic("内存紧张，已收起展开的候选")
+      renderCandidateStrip()
+    }
   }
 
   /// 补上组字中那次内存警告没清的引擎缓存。只在组字刚结束时由 `render` 调用：引擎这时没有候选，清缓存返回的快照没有要画的东西，丢掉它和空闲时的警告是同一个道理。
@@ -1538,6 +1550,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     cancelBackspacePress()
     diagnosticDismissTimer?.invalidate()
     diagnosticDismissTimer = nil
+    // 读数气泡只属于这一次出现，收起键盘时一起收掉，别留到下次。
+    dismissMemoryBubble()
     keyPressFlushTimer?.invalidate()
     keyPressFlushTimer = nil
     flushStatistics()
@@ -3098,6 +3112,14 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
         }
       ]
     }
+
+    // 双击品牌键看内存读数（`presentMemoryBubble`）：键盘里没有 Xcode 的内存仪表，诊断日志又写在未签名
+    // 测试包拿不到的 App Group 里，这个气泡是唯一能在设备上直接读到占用、余量和峰值的地方。单击仍是功能菜单，
+    // 两者靠延时区分（见 `handleBrandTap`）；长按仍是编辑工具栏，不受影响。
+    let brandDoubleTap = UITapGestureRecognizer(target: self, action: #selector(handleBrandDoubleTap))
+    brandDoubleTap.numberOfTapsRequired = 2
+    brandDoubleTap.name = "brandDoubleTap"
+    moreShortcut.addGestureRecognizer(brandDoubleTap)
     container.addSubview(shortcutBar)
     // 与候选行相同：顶栏收起时由隐藏的工具栏让步。
     let shortcutBarBottom = shortcutBar.bottomAnchor.constraint(equalTo: container.bottomAnchor)
@@ -3152,7 +3174,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       setChinesePunctuation(!chinesePunctuation)
       updateShortcutButtons()
     }, for: .primaryActionTriggered)
-    moreShortcut.addAction(UIAction { [weak self] _ in self?.toggleMorePicker() }, for: .primaryActionTriggered)
+    // 单击开功能菜单，但要等双击判定过去；双击是内存读数气泡（`handleBrandDoubleTap`）。
+    moreShortcut.addAction(UIAction { [weak self] _ in self?.handleBrandTap() }, for: .primaryActionTriggered)
     symbolsShortcut.addAction(UIAction { [weak self] _ in
       guard let self else { return }
       if symbolPanel != nil { closeKeyboardPicker(); return }
@@ -3243,6 +3266,54 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     guard gesture.state == .began else { return }
     playInputClick()
     openApp(KeyboardAppLauncher.toolbarSettingsURL)
+  }
+
+  /// 品牌键被点了一下。单击开/关功能菜单，和改动前一样**不做延时**：菜单是高频操作，为了等双击判定把它
+  /// 拖慢两百多毫秒不值得；代价是双击时菜单会先闪一下（第一下已经把它打开，第二下才收掉换成气泡）。
+  private func handleBrandTap() {
+    // 双击的第二下由 `handleBrandDoubleTap` 处理（它已把菜单收掉并弹出气泡）。手势先认出双击、
+    // 按钮动作后到的那种顺序里，这一次动作要吞掉，否则菜单又在气泡底下打开了。
+    if brandDoubleTapConsumedTap {
+      brandDoubleTapConsumedTap = false
+      return
+    }
+    toggleMorePicker()
+  }
+
+  /// 双击品牌键：弹出内存读数气泡（`KeyboardMemoryBubble`）。第一下已经把功能菜单打开了，这里先收掉它。
+  /// 读数只在弹出这一刻取一次；再双击一次会先收掉旧气泡，屏幕上始终只有一个。
+  @objc private func handleBrandDoubleTap() {
+    brandDoubleTapConsumedTap = true
+    DispatchQueue.main.async { [weak self] in self?.brandDoubleTapConsumedTap = false }
+    closeKeyboardPicker()
+    playInputClick()
+    presentMemoryBubble()
+  }
+
+  /// 把读数气泡盖在整块键盘上，位置贴着品牌键下方；已经有气泡时先收掉旧的（连点两下以上只留一个）。
+  private func presentMemoryBubble() {
+    memoryBubble?.dismiss()
+    let bubble = KeyboardMemoryBubble(sample: DiagnosticLog.MemorySample.current())
+    bubble.onDismiss = { [weak self, weak bubble] in
+      guard let self, let bubble, memoryBubble === bubble else { return }
+      memoryBubble = nil
+    }
+    bubble.frame = view.bounds
+    bubble.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    if !moreShortcut.isHidden, moreShortcut.window != nil {
+      bubble.pillTop = moreShortcut.convert(moreShortcut.bounds, to: view).maxY + 10
+    }
+    view.addSubview(bubble)
+    memoryBubble = bubble
+    bubble.layoutIfNeeded()
+    // 读屏用户听得到同样的三个数：气泡只停 3 秒，等他们自己摸过去就没了。
+    UIAccessibility.post(notification: .announcement, argument: bubble.text)
+  }
+
+  /// 收掉读数气泡：键盘收起时调用（气泡自己到点或被点一下也会走同一条路，并清掉这里的引用）。
+  private func dismissMemoryBubble() {
+    memoryBubble?.dismiss()
+    memoryBubble = nil
   }
 
   /// 工具栏上可以在「键盘工具栏」设置里打开或关掉的按钮，即品牌键和收起键之外的全部按钮。
@@ -9880,8 +9951,12 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
         refreshGlossCard(panelSnapshot: snapshot)
         return
       }
-      // 九键面板里选拼音、退格和筛选都会换一代候选，面板留着、按新的一代重建，组字结束才收起。面板里刚选了候选时普通网格也一样（`selectPanelCandidate`）；其他换代照旧收起普通网格。
-      guard nineKeyPanelColumns != nil || candidatePanelFollowsSelection, hasComposition else {
+      // 九键面板里选拼音、退格和筛选都会换一代候选，面板留着、按新的一代重建，组字结束才收起。面板里刚选了候选时普通网格也一样（`selectPanelCandidate`）。
+      // 组字一个字都没变、只是换了代时，普通网格也原地换新一代：云候选与 AI 行到达、引擎放出暂扣的尾部、词库同步都会这么换代，用户刚展开的列表不该因此整个收掉——收掉会把键区闪一下再复原，看起来就是「点了展开没展开」。组字真的变了（上屏、退格、换方案）才收起。
+      let followsComposition = nineKeyPanelColumns != nil || candidatePanelFollowsSelection
+      let generationOnly = snapshot.preedit == current.preedit && !snapshot.entries.isEmpty
+      let keepsPanel = followsComposition ? hasComposition : generationOnly
+      guard keepsPanel else {
         closeKeyboardPicker()
         return
       }
@@ -9889,7 +9964,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       panel.reload(candidates: candidatePanelTexts(snapshot), annotations: candidatePanelAnnotations(snapshot),
                    markers: candidatePanelMarkers(snapshot), aiPlaceholders: candidatePanelAIPlaceholders(snapshot),
                    confidentCorrections: candidatePanelConfidentCorrections(snapshot),
-                   corrections: candidatePanelCorrections(snapshot))
+                   corrections: candidatePanelCorrections(snapshot),
+                   keepingScrollPosition: !followsComposition)
       updateNineKeyPanelColumns()
       return
     }
