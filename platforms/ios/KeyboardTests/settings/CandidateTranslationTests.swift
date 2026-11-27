@@ -906,6 +906,29 @@ final class CandidateTranslationTests: XCTestCase {
     XCTAssertLessThanOrEqual(long[0].height, short[0].height + 2, "长释义跨列后不额外抬高整行")
   }
 
+  /// 系统样式的首块边框按行数定高：中文候选带短英文释义和英文候选带长中文释义都只占一行，边框高度必须一致，长释义截断而不换行。
+  func testTheSystemStyleKeepsOneLineGlossChipsTheSameHeight() throws {
+    func selectedHeight(candidate: String, gloss: String) throws -> CGFloat {
+      let view = KeyboardCandidatePanelView(
+        candidates: [candidate, "备用"], preedit: "x",
+        annotations: [KeyboardCandidateAnnotation(text: gloss, accessibilityDescription: ""), .none],
+        display: { $0 }, onSelect: { _ in }, onClose: {},
+        style: .system, onHandwriting: {}, onDelete: {}, expandsInPlace: true)
+      view.frame = CGRect(x: 0, y: 0, width: 375, height: 260)
+      view.layoutIfNeeded()
+      let chip = try XCTUnwrap(
+        descendants(view).first { $0.accessibilityIdentifier == "panelCandidate-1" } as? UIButton)
+      return chip.bounds.height
+    }
+
+    let chineseWithEnglish = try selectedHeight(candidate: "我的", gloss: "my")
+    let englishWithChinese = try selectedHeight(candidate: "iOS", gloss: "国际标准化组织; 网")
+    XCTAssertEqual(chineseWithEnglish, englishWithChinese, accuracy: 0.5,
+                   "释义长短不该改变首块边框的高度")
+    XCTAssertLessThanOrEqual(englishWithChinese, KeyboardCandidatePanelView.systemCellHeight + 2,
+                             "一行释义的边框不该比系统格子的固定高度还高")
+  }
+
   /// 卡片样式与系统样式共用原地展开的布局：右侧窄列、网格止于那一列；差别只在格子本身，卡片是按键式的面，系统样式只有文字。
   func testTheCardStyleSharesTheInPlaceLayoutAndKeepsItsOwnChips() throws {
     func panel(_ style: CandidatePanelStylePreference.Style) -> KeyboardCandidatePanelView {

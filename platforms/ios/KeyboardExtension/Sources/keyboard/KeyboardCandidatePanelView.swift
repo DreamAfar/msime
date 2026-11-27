@@ -44,9 +44,10 @@ final class KeyboardCandidatePanelView: CandidateCanvasHostView, UICollectionVie
   /// 系统样式的固定列数：系统的拼音面板在 375pt 宽的机器上就是六列。
   static let systemColumns = 6
   /// 系统样式的格子高度与间隔。格子只有字，所以比按键式的 44pt 高一点、间隔小一点，一屏正好六行。
+  /// 上下各 4pt：候选一行加释义一行正好放进 46pt，长释义在格子里截断而不换行，首块边框高度才不会因释义长短而变。
   static let systemCellHeight: CGFloat = 46
   static let systemCellSpacing: CGFloat = 2
-  static let systemCellInsets = NSDirectionalEdgeInsets(top: 6, leading: 10, bottom: 6, trailing: 4)
+  static let systemCellInsets = NSDirectionalEdgeInsets(top: 4, leading: 10, bottom: 4, trailing: 4)
   /// 原地展开时右侧那一窄列：收起、手写、删除三个按钮竖着排。卡片与系统样式共用。
   static let inlineTrailingColumnWidth: CGFloat = 44
 
@@ -464,9 +465,12 @@ final class KeyboardCandidatePanelView: CandidateCanvasHostView, UICollectionVie
     let verticalInsets = style == .system ? Self.systemCellInsets : Self.cellInsets
     let insets = verticalInsets.top + verticalInsets.bottom
     let lines = chip.titleLineHeight + CGFloat(chip.glossLines) * UIFont.preferredFont(forTextStyle: .caption2).lineHeight
+    if style == .system {
+      // 系统样式按行数定高，不拿字串量出来的高度抬高整行：中文候选下的英文释义和英文候选下的中文释义都是一行，首块边框就该一样高。
+      return ceil(max(Self.systemCellHeight, insets + lines + 2))
+    }
     let measured = chip.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height
-    let minimum = style == .system ? Self.systemCellHeight : Self.cellHeight
-    return ceil(max(minimum, insets + lines + 2, chip.glossLines > 0 ? measured : 0))
+    return ceil(max(Self.cellHeight, insets + lines + 2, chip.glossLines > 0 ? measured : 0))
   }
 
   private func makeChip(candidate: String, index: Int, reusing chip: CandidateGridButton,
@@ -547,6 +551,8 @@ final class KeyboardCandidatePanelView: CandidateCanvasHostView, UICollectionVie
     // 格子随单元格复用，被手指按过的格子再套用 configuration 时 UIKit 会给标题挂 0.25s 的淡入淡出（`CATransition` fade），面板重新载入后新旧两个词叠着渐变。候选按 #10330 立即呈现，换字放在不带动画的块里做完；只用来量尺寸的格子不上屏，不必立即布局。
     UIView.performWithoutAnimation {
       chip.configuration = configuration
+      // 套用 configuration 会重建标题标签，这里立即钉住行数：系统样式的长释义因此被截在一行内，不会换行把首块边框撑高。测量用的格子也要钉住，否则量出来的高度是上一次复用留下的行数。
+      chip.titleLabel?.numberOfLines = 1 + glossLines
       if interactive { chip.layoutIfNeeded() }
     }
     chip.configurationUpdateHandler = { button in

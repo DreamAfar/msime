@@ -272,6 +272,15 @@ final class KeyboardKeyButton: UIButton {
   var holdOptions: (() -> [String])?
   /// 弹出选项时回调，参数是这次算好的选项。
   var onHoldOptions: (([String]) -> Void)?
+  /// 按住不放左右滑动时，手指挪到第几个选项上；控制器据此高亮气泡里的对应项。字母键才设，
+  /// 九键长按菜单仍靠点按钮选，不接滑动。
+  var onHoldOptionHighlight: ((Int) -> Void)?
+  /// 长按选项弹出后松手，提交当前高亮的那一项。只有字母键设；九键长按不动，松手什么也不输入。
+  var onHoldOptionCommit: ((Int) -> Void)?
+  /// 这次长按当前高亮的选项下标，初值 0（第一项）。
+  private var holdOptionHighlight = 0
+  /// 这次弹出的选项数；滑动换算高亮时夹在 `[0, count-1]`。`triggerHoldOptions` 里同步赋值。
+  private var holdOptionCount = 0
   /// 为真时长按什么也不做，松手照常点按。组字中用它把长按交还给普通输入，免得选项把拼音组字结束掉。
   var holdSuppressed: (() -> Bool)?
 
@@ -469,9 +478,19 @@ final class KeyboardKeyButton: UIButton {
   }
 
   override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-    // 判出九键滑动或弹出长按选项之后，这次触摸不再是点按：键不再跟着手指进出变高亮，
-    // 否则 UIKit 会把按键重新画亮、放大气泡又盖回选项上。
-    guard nineKeySwipe.gesture == .none, !nineKeyFlick.consumed, !holdOptionsTriggered else { return }
+    // 长按选项已弹出：手指仍在原键上，左右滑动改成在气泡里选那一项，键本身不再跟随手指变高亮
+    // （否则 UIKit 把按键画亮、按下预览又盖回选项上）。位移换算交给布局，回调控制器改气泡高亮。
+    if holdOptionsTriggered, let touch = touches.first {
+      let dx = touch.location(in: nil).x - cornerHintDown.x
+      let index = KeyboardHoldOptionsLayout.highlightedIndex(dx: dx, count: holdOptionCount)
+      if index != holdOptionHighlight {
+        holdOptionHighlight = index
+        onHoldOptionHighlight?(index)
+      }
+      return
+    }
+    // 判出九键滑动之后，这次触摸不再是点按：键不再跟着手指进出变高亮。
+    guard nineKeySwipe.gesture == .none, !nineKeyFlick.consumed else { return }
     super.touchesMoved(touches, with: event)
     if nineKeySwipe.gesture != .none { isHighlighted = nineKeySwipe.gesture == .digit }
   }
@@ -510,11 +529,15 @@ final class KeyboardKeyButton: UIButton {
       onSwipeAction?(directional.action, directional.direction)
       return
     }
-    // 长按选项已经在弹窗里，松手不再输入这个字母，也不执行角标。
+    // 长按选项已经在弹窗里：手指一直按着，松手把当前高亮的那一项上屏（左右滑过就换选中项），
+    // 不再输入这个字母，也不执行角标。九键长按没有 onHoldOptionCommit，维持原来松手不输入。
     if holdOptionsTriggered {
+      let commit = onHoldOptionCommit
+      let selected = holdOptionHighlight
       super.touchesCancelled(touches, with: event)
       resetCornerHint()
       touchDownLocation = nil
+      commit?(selected)
       return
     }
     guard cornerHintTriggered, let hint = cornerHint else {
@@ -604,10 +627,13 @@ final class KeyboardKeyButton: UIButton {
     previewTitleOverride = hint
   }
 
-  /// 按住满半秒且有选项：收起按下预览，把选项交给控制器。这次触摸到此为止，松手什么也不输入。
+  /// 按住满半秒且有选项：收起按下预览，把选项交给控制器。手指仍按在原键上，左右滑动接着在气泡里选，
+  /// 松手提交高亮项；原点就是这次的按下点。
   private func triggerHoldOptions(_ options: [String]) {
     touchDownLocation = nil
     holdOptionsTriggered = true
+    holdOptionCount = options.count
+    holdOptionHighlight = 0
     cornerHintHold?.invalidate()
     cornerHintHold = nil
     previewTitleOverride = nil
@@ -615,6 +641,8 @@ final class KeyboardKeyButton: UIButton {
     isHighlighted = false
     removePressPreview()
     onHoldOptions?(options)
+    // 弹出即默认高亮第一项；控制器还没建气泡时它记下索引，建好后按这个索引画高亮。
+    onHoldOptionHighlight?(holdOptionHighlight)
   }
 
   private func resetCornerHint() {

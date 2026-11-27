@@ -288,6 +288,11 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private var emojiPicker: KeyboardEmojiPickerView?
   private var symbolPanel: KeyboardSymbolPanelView?
   private var nineKeyHoldPopup: UIView?
+  /// 长按选项气泡里的按钮、文本和提交回调，与按键的左右滑动选中状态配套：滑动时改高亮，松手提交高亮项。
+  private var holdOptionButtons: [UIButton] = []
+  private var holdOptionTexts: [String] = []
+  private var holdOptionCommit: ((String) -> Void)?
+  private var holdOptionHighlight = 0
   private struct NineKeyGridKey {
     let button: UIButton
     let digit: Int
@@ -2742,7 +2747,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private func showLetterHoldOptions(from button: UIButton, letter: String) {
     let options = letterHoldOptions(for: letter)
     guard !options.isEmpty else { return }
-    showKeyHoldOptions(from: button, options: options, identifierPrefix: "letterHoldOption") { [weak self] option in
+    showKeyHoldOptions(from: button, options: options, identifierPrefix: "letterHoldOption",
+                       enablesSlideSelection: true) { [weak self] option in
       guard let self else { return }
       self.countKeyPress(TypingKeyID.character(letter))
       // 角标仍走原来那条路（本地模式、英文建议的收尾都在里面）；其余字符按字面上屏。
@@ -2762,8 +2768,11 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   /// 长按菜单：九键 1 弹出数字，2–9 弹出数字和字母，14 键弹出这一键的字母，26 键字母键弹出它的长按选项
   /// （音调、角标、大小写、上下标，见 `LetterHoldPreference`）。选中的一项先结束组字再上屏，
   /// 全角开关打开时写全角（`commitNineKeyHoldOption`）。最多五列，多出的折到下一行，两行放得下十个。
+  /// `enablesSlideSelection` 为 true（26 键字母键）时，源按键按住左右滑动会高亮选项、松手上屏高亮项；
+  /// 九键长按菜单保持原样：只靠点按钮选，松手不输入。
   private func showKeyHoldOptions(from key: UIButton, options optionTexts: [String],
                                   identifierPrefix: String = "nineKeyHoldOption",
+                                  enablesSlideSelection: Bool = false,
                                   commit: ((String) -> Void)? = nil) {
     dismissNineKeyHoldOptions()
     playInputClick()
@@ -2789,11 +2798,15 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     options.translatesAutoresizingMaskIntoConstraints = false
 
     var row: UIStackView?
+    holdOptionButtons = []
+    holdOptionTexts = optionTexts
+    holdOptionCommit = commit
+    holdOptionHighlight = 0
     for (index, option) in optionTexts.enumerated() {
       if index % 5 == 0 {
         let next = UIStackView()
         next.axis = .horizontal
-        next.spacing = 4
+        next.spacing = KeyboardHoldOptionsLayout.itemSpacing
         next.alignment = .center
         options.addArrangedSubview(next)
         row = next
@@ -2804,9 +2817,18 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       }
       item.configuration?.contentInsets = .zero
       item.accessibilityIdentifier = "\(identifierPrefix)-\(option)"
-      item.widthAnchor.constraint(equalToConstant: 36).isActive = true
+      item.widthAnchor.constraint(equalToConstant: KeyboardHoldOptionsLayout.itemWidth).isActive = true
       item.heightAnchor.constraint(equalToConstant: 38).isActive = true
       row?.addArrangedSubview(item)
+      holdOptionButtons.append(item)
+    }
+
+    // 字母键：源按键装滑动/提交回调，弹出即默认高亮第一项，按住左右滑动改高亮、松手上屏高亮项。
+    // 九键长按菜单不接这套，仍是点按钮选、松手不输入。
+    if enablesSlideSelection, let source = key as? KeyboardKeyButton {
+      source.onHoldOptionHighlight = { [weak self] index in self?.highlightHoldOption(at: index) }
+      source.onHoldOptionCommit = { [weak self] index in self?.commitHoldOption(at: index) }
+      highlightHoldOption(at: holdOptionHighlight)
     }
 
     view.addSubview(backdrop)
@@ -2830,6 +2852,32 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     dismissNineKeyHoldOptions()
   }
 
+  /// 长按选项气泡里高亮第 index 项：选中项填强调色、其余恢复按键底色。手指按住字母键左右滑动时由按键回调，
+  /// 弹出时先高亮第一项。用 `performWithoutAnimation` 避免 UIKit 给配置变更挂淡入淡出、把滑动选中拖慢。
+  private func highlightHoldOption(at index: Int) {
+    guard holdOptionButtons.indices.contains(index) else { return }
+    holdOptionHighlight = index
+    let skin = KeyboardTheme.current
+    UIView.performWithoutAnimation {
+      for (offset, item) in holdOptionButtons.enumerated() {
+        let selected = offset == index
+        item.configuration?.background.backgroundColor = selected ? skin.actionBackground : skin.keyBackground
+        item.configuration?.baseForegroundColor = selected ? skin.actionForeground : skin.keyForeground
+        item.accessibilityTraits = selected ? [.button, .selected] : [.button]
+      }
+    }
+  }
+
+  /// 松手上屏当前高亮的选项：走与点气泡按钮相同的提交路径（字母键的 `commit` 处理角标与统计），
+  /// 提交后收起气泡。数组与回调在 `showKeyHoldOptions` 里同步存好，气泡关掉时清空。
+  private func commitHoldOption(at index: Int) {
+    guard holdOptionTexts.indices.contains(index) else { return }
+    let option = holdOptionTexts[index]
+    let commit = holdOptionCommit
+    dismissNineKeyHoldOptions()
+    if let commit { commit(option) } else { commitNineKeyHoldOption(option) }
+  }
+
   @objc private func dismissNineKeyHoldOptionsGesture() {
     dismissNineKeyHoldOptions()
   }
@@ -2837,6 +2885,10 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private func dismissNineKeyHoldOptions() {
     nineKeyHoldPopup?.removeFromSuperview()
     nineKeyHoldPopup = nil
+    holdOptionButtons = []
+    holdOptionTexts = []
+    holdOptionCommit = nil
+    holdOptionHighlight = 0
   }
 
   private func makeCandidateStrip() -> UIView {

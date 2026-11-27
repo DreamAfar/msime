@@ -647,6 +647,58 @@ final class LetterCornerHintTests: XCTestCase {
                    "总开关关掉后长按回到输入角标")
   }
 
+  /// 按住不放左右滑动：每挪过一个格子（宽 + 间隔）换一项，不足半格算原地，两头夹住不越界。
+  func testHoldOptionHighlightFollowsHorizontalOffset() {
+    let step = KeyboardHoldOptionsLayout.itemWidth + KeyboardHoldOptionsLayout.itemSpacing
+    XCTAssertEqual(KeyboardHoldOptionsLayout.highlightedIndex(dx: 0, count: 4), 0)
+    XCTAssertEqual(KeyboardHoldOptionsLayout.highlightedIndex(dx: step * 0.4, count: 4), 0, "不到半格不换")
+    XCTAssertEqual(KeyboardHoldOptionsLayout.highlightedIndex(dx: step * 0.6, count: 4), 1)
+    XCTAssertEqual(KeyboardHoldOptionsLayout.highlightedIndex(dx: step * 2, count: 4), 2)
+    XCTAssertEqual(KeyboardHoldOptionsLayout.highlightedIndex(dx: -step, count: 4), 0, "向左不越界")
+    XCTAssertEqual(KeyboardHoldOptionsLayout.highlightedIndex(dx: step * 9, count: 4), 3, "向右夹到最后一项")
+    XCTAssertEqual(KeyboardHoldOptionsLayout.highlightedIndex(dx: 100, count: 0), 0)
+  }
+
+  /// 字母键长按弹出后默认高亮第一项，按住左右滑动改高亮、松手上屏高亮项；九键长按不接这套。
+  func testLetterHoldOptionsHighlightAndSlideToCommit() throws {
+    let defaults = KeyboardLayoutPreference.defaults
+    let stored = defaults.object(forKey: LetterHoldPreference.key)
+    let storedEnabled = defaults.object(forKey: LetterHoldPreference.enabledKey)
+    addTeardownBlock {
+      if let stored { defaults.set(stored, forKey: LetterHoldPreference.key) }
+      else { defaults.removeObject(forKey: LetterHoldPreference.key) }
+      if let storedEnabled { defaults.set(storedEnabled, forKey: LetterHoldPreference.enabledKey) }
+      else { defaults.removeObject(forKey: LetterHoldPreference.enabledKey) }
+    }
+    LetterHoldPreference.reset()
+    LetterHoldPreference.enabled = true
+
+    let controller = makeController(.quanpin)
+    let e = try key(labelled: "字母 E", in: controller)
+    let options = try XCTUnwrap(e.holdOptions?())
+    e.onHoldOptions?(options)
+
+    let buttons = ["ē", "é", "ě", "è"].compactMap { option in
+      nodes(controller.view).first { $0.accessibilityIdentifier == "letterHoldOption-\(option)" } as? UIButton
+    }
+    XCTAssertEqual(buttons.count, 4)
+    XCTAssertTrue(buttons[0].accessibilityTraits.contains(.selected), "弹出即默认高亮第一项")
+    XCTAssertFalse(buttons[1].accessibilityTraits.contains(.selected))
+    XCTAssertNotNil(e.onHoldOptionHighlight, "字母键接上滑动高亮")
+    XCTAssertNotNil(e.onHoldOptionCommit, "字母键接上松手提交")
+
+    // 滑到第二项：控制器把它高亮，第一项取消。
+    e.onHoldOptionHighlight?(1)
+    XCTAssertFalse(buttons[0].accessibilityTraits.contains(.selected))
+    XCTAssertTrue(buttons[1].accessibilityTraits.contains(.selected))
+    e.onHoldOptionHighlight?(3)
+    XCTAssertTrue(buttons[3].accessibilityTraits.contains(.selected))
+
+    // 松手提交当前高亮项后气泡收起。
+    e.onHoldOptionCommit?(3)
+    XCTAssertNil(nodes(controller.view).first { $0.accessibilityIdentifier == "nineKeyHoldOptions" })
+  }
+
   /// 26 键字母键带着长按选项和弹窗接线；中文 e 弹四项声调，弹窗里有对应的按钮。
   func testLetterKeyLongPressShowsItsOptions() throws {
     let defaults = KeyboardLayoutPreference.defaults
