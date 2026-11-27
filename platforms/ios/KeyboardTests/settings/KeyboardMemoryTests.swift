@@ -131,7 +131,7 @@ final class KeyboardMemoryTests: XCTestCase {
       "占用 41.2 MiB · 余量 12.0 MiB · 峰值 48.0 MiB")
     XCTAssertEqual(
       KeyboardMemoryBubble.text(for: DiagnosticLog.MemorySample(footprint: 0, available: 0)),
-      "占用 0.0 MiB · 余量未知 · 峰值 0.0 MiB")
+      "占用 0.0 MiB · 余量 未知 · 峰值 0.0 MiB")
     // 系统取不到峰值（`ledger_phys_footprint_peak` 读失败）时按当前占用算。
     XCTAssertEqual(
       KeyboardMemoryBubble.text(for: DiagnosticLog.MemorySample(

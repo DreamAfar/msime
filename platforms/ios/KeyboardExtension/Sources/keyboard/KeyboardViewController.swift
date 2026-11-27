@@ -2656,7 +2656,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     button.accessibilityLabel = key.accessibilityLabel
   }
 
-  /// 数字九宫格上底行的 中/英 键改作句点键：按下写 .，右列中间键随之从 . 改成 =（`NineKeyMiddleKey.equals`）。中/英 键被隐藏（「隐藏中/英键」或布局本来不放）时不改，中间键仍是 .，数字页照样能输入小数点。离开数字九宫格恢复语言键面。
+  /// 数字九宫格上底行的 中/英 键改作句点键：按下写 .，右列中间键随之从 . 改成 =（`NineKeyMiddleKey.equals`）。中/英 键被隐藏时不改，中间键仍是 .，数字页照样能输入小数点；但数字页已对「隐藏中/英键」开关豁免（见 `hidesLanguage`），所以只剩布局本来不放语言键的情况会走到这里。离开数字九宫格恢复语言键面。
   private var languageKeyTypesPeriod: Bool { numberPadShown && bottomLanguageButton?.isHidden == false }
 
   /// 按 `languageKeyTypesPeriod` 给 中/英 键换键面、读屏标签和字号；`updateLanguageModeButton` 先按语言画好，这里在数字九宫格上再盖成句点。
@@ -7210,16 +7210,21 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
         FrequencyAdjustmentPreference.linearStep = linearStep
       }
     }
-    if let glossEnabled = preferences["candidate_english_gloss"] as? Bool,
-       glossEnabled != CandidateGlossPreference.enabled {
-      CandidateGlossPreference.enabled = glossEnabled
-      candidateGlossEpoch &+= 1
-      candidateGlossRequestedGeneration = nil
-      visibleCandidateGlosses = []
-      candidateTargetGlosses = [:]
+    if let glossEnabled = preferences["candidate_english_gloss"] as? Bool {
+      // 测试期临时把释义行打开：译文上屏也以它为门，见 `CandidateTranslationPreference.forcedOnForTesting`。
+      let enabled = glossEnabled || CandidateTranslationPreference.forcedOnForTesting
+      if enabled != CandidateGlossPreference.enabled {
+        CandidateGlossPreference.enabled = enabled
+        candidateGlossEpoch &+= 1
+        candidateGlossRequestedGeneration = nil
+        visibleCandidateGlosses = []
+        candidateTargetGlosses = [:]
+      }
     }
     if let translationsEnabled = preferences["candidate_translations"] as? Bool {
-      CandidateTranslationPreference.onlineEnabled = translationsEnabled
+      // 测试期临时打开候选翻译，理由同上：未签名包读不到设置页写的那一份，空格上滑也就没译文可上屏。
+      CandidateTranslationPreference.onlineEnabled =
+        translationsEnabled || CandidateTranslationPreference.forcedOnForTesting
     }
     // 缺键按关闭，与共享默认相同；变了的话候选栏布局（`applyCandidateGlossLayout`）重查音标表、重算顶栏高度。
     let pronunciationEnabled = preferences[CandidatePronunciationPreference.sharedKey] as? Bool ?? false
@@ -8239,7 +8244,14 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       let style: ActionRowStyle = symbolLayer ? .symbolLayer : nineKeyFrame ? .nineKey : tabletRow ? .tablet : phoneRow ? .phone : .standard
       phoneBottomRowShown = style == .phone
       nineKeyHeight.isActive = nineKeyFrame
-      let showsLanguage = KeyboardLayoutPreference.geometry.showsBottomLanguage
+      // 「隐藏中/英键」的生效范围（用户确认）：
+      //   受影响 —— 全拼 26 键、双拼 26 键（含自然码/微软/搜狗等双拼方案）、14 键、18 键等全键盘字母层；
+      //   不受影响 —— 「123」数字键盘（任何方案借来的数字九宫格）和「全拼 9 键」（含九键双拼、笔画的九键外框）。
+      // nineKeyFrame = 九键字母层 || 笔画 || 数字页，恰好是要豁免的两类，双拼 26 键不在其中照常隐藏。
+      // 数字页的中/英键本就改作句点键，藏掉它会丢掉小数点输入、把它的份额并给空格让空格占两列、
+      // 右列中间键退回「.」；九键字母层藏掉它同样只会被空格吃掉份额、没有收益。
+      let hidesLanguage = !KeyboardLayoutPreference.geometry.showsBottomLanguage && !nineKeyFrame
+      let showsLanguage = !hidesLanguage
       let styledRow = styledBottomRow(style: style, letterRows: letterRowsShown, letterGrid: fourteenKeyRows,
                                       numberPad: numberPad, nineKeyDigits: numberPad && (nineKey || strokes || symbolFirstSource),
                                       tallReturn: tallReturn, language: showsLanguage)
@@ -8308,7 +8320,6 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
         key.cornerHint = layerComma ? (symbolLayerIsChinese ? "。" : ".") : nil
       }
       nineKeyZeroButton.isHidden = style != .nineKey || (!showsSymbols && inputScheme != .nineKeyShuangpin)
-      let hidesLanguage = !layout.showsBottomLanguage
       bottomLanguageButton?.isHidden = style == .symbolLayer || hidesLanguage
       // 中/英 键的显隐定下来之后，再定它在数字九宫格上是不是句点键，以及右列中间键是 . 还是 =。
       applyLanguageKeyFace()

@@ -503,19 +503,28 @@ final class LetterCornerHintTests: XCTestCase {
     KeyboardLayoutPreference.swipeSymbols = true
     KeyboardLayoutPreference.swipeSymbolsDirection = .up
     KeyboardLayoutPreference.letterSwipeHint = true
-    KeyboardLayoutPreference.shuangpinKeyHints = true
     LetterSwipePreference.set(LetterSwipeBinding(action: .paste), letter: "v", direction: .down)
 
-    let controller = makeController(.shuangpin)
-    controller.viewWillAppear(false)
-    let v = try key(labelled: "字母 V", in: controller)
-    let hint = try bottomHint(of: v)
+    // 双拼提示开关改的是共享文档（`touch_shuangpin_key_hints`），键盘出现时按文档重读，所以两段都走同一条路：
+    // 先写文档再建控制器。只改 App Group 里的镜像不够——`viewWillAppear` 会用文档里的值盖回去。
+    let storedDocumentHint = MetasequoiaInputSessionBridge.loadSharedPreferences()?[
+      KeyboardLayoutPreference.shuangpinKeyHintsDocumentKey] as? Bool
+    addTeardownBlock {
+      KeyboardLayoutPreference.saveShuangpinKeyHints(storedDocumentHint ?? KeyboardLayoutPreference.shuangpinKeyHints)
+    }
+
+    XCTAssertTrue(KeyboardLayoutPreference.saveShuangpinKeyHints(true))
+    let withHint = makeController(.shuangpin)
+    withHint.viewWillAppear(false)
+    let hint = try bottomHint(of: try key(labelled: "字母 V", in: withHint))
     XCTAssertFalse(hint.isHidden)
     XCTAssertNotEqual(hint.text, "粘贴", "双拼提示在时下滑短名让位")
 
-    KeyboardLayoutPreference.shuangpinKeyHints = false
-    controller.viewWillAppear(false)
-    XCTAssertEqual(try bottomHint(of: v).text, "粘贴", "关掉双拼提示后换回下滑短名")
+    XCTAssertTrue(KeyboardLayoutPreference.saveShuangpinKeyHints(false))
+    let withoutHint = makeController(.shuangpin)
+    withoutHint.viewWillAppear(false)
+    XCTAssertEqual(try bottomHint(of: try key(labelled: "字母 V", in: withoutHint)).text, "粘贴",
+                   "关掉双拼提示后换回下滑短名")
   }
 
   // MARK: - 底行按键上下滑
@@ -589,20 +598,20 @@ final class LetterCornerHintTests: XCTestCase {
 
   // MARK: - 长按选项
 
-  /// 默认表对齐 Android：中文给字母、大小写、角标和 a/e/i/o/u 的四个声调；英文另给 ê、ü、n/m 和上下标。
+  /// 默认只列拼音声调：中文 a/e/i/o/u 各四个，英文同表、另含 ê 与 v/n/m；字母本身、角标和上下标不再列。
   func testLetterHoldDefaultsFollowTheLanguage() {
     XCTAssertEqual(LetterHoldPreference.defaults(letter: "e", chinese: true, shifted: false),
-                   ["e", "E", "3", "ē", "é", "ě", "è"])
+                   ["ē", "é", "ě", "è"])
     XCTAssertEqual(LetterHoldPreference.defaults(letter: "e", chinese: true, shifted: true),
-                   ["E", "e", "3", "ē", "é", "ě", "è"], "大写状态先列大写")
-    XCTAssertEqual(LetterHoldPreference.defaults(letter: "q", chinese: true, shifted: false),
-                   ["q", "Q", "1"], "q 没有音调，只列字母和角标")
+                   ["ē", "é", "ě", "è"], "声调不随大小写变")
+    XCTAssertEqual(LetterHoldPreference.defaults(letter: "q", chinese: true, shifted: false), [],
+                   "q 没有声调，默认不弹，长按回到角标")
     let english = LetterHoldPreference.defaults(letter: "e", chinese: false, shifted: false)
-    XCTAssertTrue(english.contains("ê"), "英文比中文多一个 ê，与 Android 同表")
-    XCTAssertEqual(english.count, 10, "大写、角标、五个音调、上下标刚好十项")
-    XCTAssertFalse(LetterHoldPreference.defaults(letter: "v", chinese: true, shifted: false).contains("ü"),
+    XCTAssertEqual(english, ["ê", "ē", "é", "ě", "è"], "英文比中文多一个 ê")
+    XCTAssertEqual(LetterHoldPreference.defaults(letter: "v", chinese: true, shifted: false), [],
                    "中文只给 a/e/i/o/u 的声调")
-    XCTAssertTrue(LetterHoldPreference.defaults(letter: "v", chinese: false, shifted: false).contains("ü"))
+    XCTAssertEqual(LetterHoldPreference.defaults(letter: "v", chinese: false, shifted: false),
+                   ["ü", "ǖ", "ǘ", "ǚ", "ǜ"])
     XCTAssertEqual(LetterHoldPreference.defaults(letter: "1", chinese: true, shifted: false), [])
   }
 
@@ -621,7 +630,7 @@ final class LetterCornerHintTests: XCTestCase {
     LetterHoldPreference.enabled = true
 
     XCTAssertEqual(LetterHoldPreference.options(letter: "E", chinese: true, shifted: false),
-                   ["e", "E", "3", "ē", "é", "ě", "è"], "没配过时用默认，大小写字母都认")
+                   ["ē", "é", "ě", "è"], "没配过时用默认，大小写字母都认")
     LetterHoldPreference.set(["ā", "ā", "ab", " ", "😀", "1"], letter: "e")
     XCTAssertEqual(LetterHoldPreference.stored(letter: "E"), ["ā", "😀", "1"], "单字素、去重、过滤")
     XCTAssertEqual(LetterHoldPreference.options(letter: "e", chinese: false, shifted: false),
@@ -638,7 +647,7 @@ final class LetterCornerHintTests: XCTestCase {
                    "总开关关掉后长按回到输入角标")
   }
 
-  /// 26 键字母键带着长按选项和弹窗接线；中文 e 弹七项，弹窗里有对应的按钮。
+  /// 26 键字母键带着长按选项和弹窗接线；中文 e 弹四项声调，弹窗里有对应的按钮。
   func testLetterKeyLongPressShowsItsOptions() throws {
     let defaults = KeyboardLayoutPreference.defaults
     let stored = defaults.object(forKey: LetterHoldPreference.key)
@@ -655,7 +664,7 @@ final class LetterCornerHintTests: XCTestCase {
     let controller = makeController(.quanpin)
     let e = try key(labelled: "字母 E", in: controller)
     let options = try XCTUnwrap(e.holdOptions?(), "字母键要带上长按选项")
-    XCTAssertEqual(options, ["e", "E", "3", "ē", "é", "ě", "è"])
+    XCTAssertEqual(options, ["ē", "é", "ě", "è"])
     XCTAssertNotNil(e.onHoldOptions)
     XCTAssertEqual(e.accessibilityCustomActions?.first?.name, "显示长按选项", "读屏也要能打开同一份选项")
 

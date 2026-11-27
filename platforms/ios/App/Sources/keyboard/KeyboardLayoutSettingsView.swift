@@ -144,13 +144,32 @@ struct KeyboardLayoutSettingsView: View {
                                  hidesPunctuation: KeyboardLayoutPreference.hidePunctuationKey,
                                  hidesSymbol: KeyboardLayoutPreference.hideSymbolKey),
         heightAdjustment: height, keyLayout: previewKeyLayout, nineKeyZero: face.nineKeyZero,
-        letterBadges: letterSwipeBadges, onLetterTap: letterSwipeEditable ? { editingLetter = LetterSwipeSheetTarget(letter: $0) } : nil
+        letterBadges: letterSwipeBadges, onLetterTap: letterSwipeEditable ? { editingLetter = LetterSwipeSheetTarget(letter: $0) } : nil,
+        onBottomKeyTap: { slot in
+          // 点预览图里的空格、中/英、符、表情、回车、逗号、句号，直接打开这个键的上滑/下滑设置；
+          // 123、地球和 0 不是可配的底行键（切层、切输入法、数字），点了什么也不做。
+          if let key = bottomSwipeKey(for: slot) { editingBottomKey = key }
+        }
       )
       .gesture(spacingDrag)
       .accessibilityIdentifier("keyboardLayoutPreview")
       Text(dragHint).font(.caption2).foregroundStyle(MetasequoiaTheme.sub)
     }
     .padding(.horizontal, 16).padding(.top, 6).padding(.bottom, 8)
+  }
+
+  /// 预览图底行槽位 → 可配的底行按键。123、地球和 0 没有上下滑设置，返回 nil。
+  private func bottomSwipeKey(for slot: TouchBottomRowLayout.Slot) -> BottomKeySwipeKey? {
+    switch slot {
+    case .space: return .space
+    case .language: return .language
+    case .symbols: return .symbols
+    case .emoji: return .emoji
+    case .returnKey: return .enter
+    case .comma: return .punctuation
+    case .period: return .period
+    case .layer, .globe, .zero: return nil
+    }
   }
 
   /// 能点预览图的字母键进编辑页：停在 26 键，且滑动或长按选项至少一个开着——
@@ -947,7 +966,7 @@ private struct LetterSwipeKeyEditorSheet: View {
       ?? LetterHoldPreference.defaults(letter: letter, chinese: chinese, shifted: false)).joined())
   }
 
-  /// 默认清单只用来回填输入框和「恢复默认」；中文键盘页用中文那份，英文另含上下标。
+  /// 默认清单只用来回填输入框和「恢复默认」；中文键盘页给 a/e/i/o/u 的声调，英文那份另含 ê 与 v/n/m。
   private var defaultHoldText: String {
     LetterHoldPreference.defaults(letter: letter, chinese: chinese, shifted: false).joined()
   }
@@ -995,7 +1014,7 @@ private struct LetterSwipeKeyEditorSheet: View {
             }
           }
           DesignGroup(title: "长按弹出",
-                      info: "按住 \(letter.uppercased()) 键半秒弹出这些字符，点一项上屏。留空保存表示这个键不弹，长按仍输入角标；默认中文给字母、角标和音调，英文另含上下标。最多 10 个单字符。") {
+                      info: "按住 \(letter.uppercased()) 键半秒弹出这些字符，点一项上屏。留空保存表示这个键不弹，长按仍输入角标；默认只列拼音声调（中文 a/e/i/o/u，英文另有 ê 与 v/n/m），没有声调的键默认不弹。最多 10 个单字符。") {
             VStack(alignment: .leading, spacing: 8) {
               TextField("留空则不弹", text: $holdText)
                 .textFieldStyle(.roundedBorder)

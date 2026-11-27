@@ -2366,6 +2366,12 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     preferences["candidate_page_size"] = CandidatePageSizePreference.size
     // Cloud candidates are opt-in on iOS; see CloudCandidatePreference. Never persisted: the shared document keeps the desktop's value.
     preferences["cloud_candidates"] = CloudCandidatePreference.enabled
+    // 测试期临时：候选翻译与释义行强制打开，引擎才会给出候选下的译文（空格上滑上屏的就是它）。
+    // 见 CandidateTranslationPreference.forcedOnForTesting；验收通过后连同那一项一起删掉，文档里的值不动。
+    if CandidateTranslationPreference.forcedOnForTesting {
+      preferences["candidate_translations"] = true
+      preferences["candidate_english_gloss"] = true
+    }
     return preferences
   }
 

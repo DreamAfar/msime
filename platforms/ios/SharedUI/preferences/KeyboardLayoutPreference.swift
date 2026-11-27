@@ -782,7 +782,8 @@ enum LetterSwipePreference {
   }
 
   /// 测试阶段给几个字母键预置的下滑动作。未签名包里 App 与键盘扩展拿不到同一个 App Group，
-  /// 设置页配的逐键动作传不进键盘，所以装包就把四个切键盘动作放在这几个键上，好当场试。
+  /// 设置页配的逐键动作传不进键盘，所以装包就把几个动作放在这些键上，好当场试：W/E/R/T 切键盘/面板，
+  /// A/C/V 依次是全选、复制、粘贴（选中一段文字再下滑就能验）。
   /// **发版前整段删掉**，并去掉下面 `configured` / `binding(in:)` 里的两处引用。
   /// 只占下滑：默认「滑动方向」是上滑，上滑仍是角标，不挡原有手感。
   static let testingDefaults: [String: [String: LetterSwipeBinding]] = [
@@ -790,6 +791,9 @@ enum LetterSwipePreference {
     "e": [downKey: LetterSwipeBinding(action: .moreSymbols)],
     "r": [downKey: LetterSwipeBinding(action: .symbolPanel)],
     "t": [downKey: LetterSwipeBinding(action: .phrases)],
+    "a": [downKey: LetterSwipeBinding(action: .selectAll)],
+    "c": [downKey: LetterSwipeBinding(action: .copy)],
+    "v": [downKey: LetterSwipeBinding(action: .paste)],
   ]
 
   /// 用户存过的那条，或测试阶段预置的那条；都没有时是 nil。
@@ -859,9 +863,9 @@ enum LetterSwipePreference {
 
 /// 26 键字母键长按弹出的选项：按住半秒列出这个键能输入的字符，点一项上屏。
 ///
-/// 默认表对齐 Android（`EnglishLetterHoldPolicy` / `showLetterOptions`）：中文给这个键的小写、大写、角标和
-/// a/e/i/o/u 的四个声调，英文另给 ê、v 的 ü 与 ǖǘǚǜ、n/m 的声调，以及上下标。逐键自定义存本机 App Group，
-/// JSON 形如 `{"e":["e","E","3","ē","é","ě","è"]}`；**空数组是「这个键不弹」**（长按回到输入角标），与缺键（跟随默认）不同。
+/// 默认只列拼音声调（中文 a/e/i/o/u 各四个；英文同表，另含 ê 与 v、n、m 的音调），字母本身、大写、角标和上下标
+/// 不再列进去——它们短按、Shift 或上滑就能输入。没有声调的键默认不弹，长按回落到「输入角标」。逐键自定义存本机 App Group，
+/// JSON 形如 `{"e":["ē","é","ě","è"]}`；**空数组是「这个键不弹」**（长按回到输入角标），与缺键（跟随默认）不同。
 enum LetterHoldPreference {
   static let key = "keyboard.gesture.letterHoldOptions"
   /// 总开关；关闭后长按回到原来「直接输入角标」。
@@ -895,20 +899,16 @@ enum LetterHoldPreference {
     return defaults(letter: letter, chinese: chinese, shifted: shifted)
   }
 
-  /// 没有自定义时的默认选项。`shifted` 为真时先列大写，其余字符（角标、声调、上下标）不变。
+  /// 没有自定义时的默认选项：**只列拼音声调**。
+  ///
+  /// 字母本身、大写、角标和上下标不再列进来——那些短按、Shift 或上滑就能输入，弹窗里再放一遍只是把声调挤到后面。
+  /// 中文只给 a/e/i/o/u 的四个声调；英文用同一张表，另含 ê 与 v、n、m 的音调。没有声调的键（q、w、b…）返回空，
+  /// 长按回落到「输入角标」。`shifted` 保留在签名里给调用方，默认清单不再分大小写。
   static func defaults(letter: String, chinese: Bool, shifted: Bool) -> [String] {
     let lower = letter.lowercased()
-    guard lower.count == 1, let character = lower.first, character.isASCII, character.isLetter else { return [] }
-    let upper = lower.uppercased()
-    var items = shifted ? [upper, lower] : [lower, upper]
-    if let corner = LetterHintSymbols.hint(for: lower) { items.append(corner) }
-    let tones = chinese ? mandarinTones[character] : extendedTones[character]
-    if let tones { items.append(contentsOf: tones.map(String.init)) }
-    if !chinese {
-      if let superscript = superscripts[character] { items.append(superscript) }
-      if let lowered = subscripts[character] { items.append(lowered) }
-    }
-    return normalize(items)
+    guard lower.count == 1, let character = lower.first else { return [] }
+    guard let tones = chinese ? mandarinTones[character] : extendedTones[character] else { return [] }
+    return normalize(tones.map(String.init))
   }
 
   /// 单字素、去重、最多 `maximumCount` 项；空白和控制字符丢掉。组合 emoji 算一个字素。
@@ -957,18 +957,6 @@ enum LetterHoldPreference {
   private static let extendedTones: [Character: String] = [
     "a": "āáǎà", "e": "êēéěè", "i": "īíǐì", "o": "ōóǒò", "u": "ūúǔù",
     "v": "üǖǘǚǜ", "n": "ńňǹ", "m": "ḿ",
-  ]
-
-  /// Unicode 没有上下标的字母（q、w、y、z 的上标；b、c、d、f、g、q、w、y、z 的下标）不列。
-  private static let superscripts: [Character: String] = [
-    "a": "ᵃ", "b": "ᵇ", "c": "ᶜ", "d": "ᵈ", "e": "ᵉ", "f": "ᶠ", "g": "ᵍ", "h": "ʰ", "i": "ⁱ", "j": "ʲ",
-    "k": "ᵏ", "l": "ˡ", "m": "ᵐ", "n": "ⁿ", "o": "ᵒ", "p": "ᵖ", "r": "ʳ", "s": "ˢ", "t": "ᵗ", "u": "ᵘ",
-    "v": "ᵛ", "w": "ʷ", "x": "ˣ", "y": "ʸ", "z": "ᶻ",
-  ]
-
-  private static let subscripts: [Character: String] = [
-    "a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "j": "ⱼ", "k": "ₖ", "l": "ₗ", "m": "ₘ", "n": "ₙ", "o": "ₒ",
-    "p": "ₚ", "r": "ᵣ", "s": "ₛ", "t": "ₜ", "u": "ᵤ", "v": "ᵥ", "x": "ₓ",
   ]
 
   private static func write(_ table: [String: [String]]) {

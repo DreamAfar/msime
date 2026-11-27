@@ -19,6 +19,12 @@ enum CandidateTranslationScope: String, CaseIterable, Sendable {
 }
 
 enum CandidateTranslationPreference {
+  /// 测试期临时开关：把「候选词翻译」（连带它依赖的释义行）在键盘里强制打开。
+  ///
+  /// 未签名的测试包拿不到 App Group，设置页写的开关键盘读不到；共享文档里这一项又是新装默认关闭，于是候选下面
+  /// 既没有译文也没有释义，空格上滑「上屏候选译文」根本没有东西可上屏。验收期间强制打开，验收通过后删掉这一项
+  /// 与三处引用（`KeyboardViewController` 的镜像、`MetasequoiaInputSessionBridge.hostOverrides`、释义那一行）。
+  static let forcedOnForTesting = true
   static let primaryKey = "candidate.translationLanguage"
   static let secondaryKey = "candidate.translationSecondaryLanguage"
   static let onlineKey = "candidate.translationOnline"

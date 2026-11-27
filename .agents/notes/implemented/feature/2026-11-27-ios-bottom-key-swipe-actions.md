@@ -22,7 +22,7 @@ Status: implemented
 - 执行路径拆成三层：`performLetterSwipeAction` 只处理角标与自定义文本，`performBottomSwipeAction` 处理底行自有语义（没有角标，「角标符号」当作不接），其余动作统一走 `performSwipeAction`。底行键**不受**「滑动输入符号」总开关约束：那个开关是字母键角标的总闸，底行本来就没有角标。
 - 设置页「键盘 → 手势」下面新增「底行按键滑动」组：每个键一行，摘要写「上滑 X · 下滑 Y」，点开是 `BottomKeySwipeEditorSheet`，交互与字母键的编辑页相同（每次选择立即写 App Group、可填自定义文本、可单键恢复默认），但选项里没有「角标符号」。
 - 「重置所有设置」的本地清单补上 `LetterSwipePreference.key` 与 `BottomKeySwipePreference.key`：这两张表原先都没被重置，属于既有缺口。
-- **测试阶段预置**：`LetterSwipePreference.testingDefaults` 给 W / E / R / T 的下滑分别绑 123 / #+= / 符 / 常用语（上滑不动，仍是角标），装包即可试。`configured(letter:direction:)`、`binding(letter:direction:)`、`binding(in:...)` 与键盘的 `letterSwipeBinding` 都会查这张表。发版前整段删掉这个常量与这几处引用即可，字母键的其余行为不受影响。
+- **测试阶段预置**：`LetterSwipePreference.testingDefaults` 给 W / E / R / T 的下滑分别绑 123 / #+= / 符 / 常用语，A / C / V 的下滑绑全选 / 复制 / 粘贴（上滑不动，仍是角标），装包即可试——后三个是用户验收时要的动作，选一段文字再下滑就能验。`configured(letter:direction:)`、`binding(letter:direction:)`、`binding(in:...)` 与键盘的 `letterSwipeBinding` 都会查这张表。发版前整段删掉这个常量与这几处引用即可，字母键的其余行为不受影响。
 
 ## Alternatives considered
 
@@ -40,7 +40,7 @@ Status: implemented
 - 译文上屏依赖候选条已经拿到译文：在线翻译需要完全访问与服务配置，离线释义需要英文释义开关；都没有时不动作，释义卡片里同样是「暂无译文」。
 - 「仅当前高亮」打开时只取高亮的那一个（本来就只取高亮候选）；展开网格里的候选不在候选条上，空格上滑取不到它，仍走长按卡片。
 - 底行键的滑动不写键面提示，用户只能从设置页的摘要看到；如果以后要提示，需要给这些键安排底部那一行的位置（现在那行只属于字母键）。
-- 测试预置会在设置页预览图的编辑页里显示 W/E/R/T 的下滑动作，但预览图徽标只标用户存过的键，那四个键不会出现徽标——这是刻意的，徽标语义仍是「用户改过的键」。
+- 测试预置会在设置页预览图的编辑页里显示 W/E/R/T/A/C/V 的下滑动作，但预览图徽标只标用户存过的键，这几个键不会出现徽标——这是刻意的，徽标语义仍是「用户改过的键」。
 
 ## Testing
 
@@ -52,6 +52,16 @@ Status: implemented
 `testLetterSwipeShortTitleAbbreviatesForBadges` 补了 `commitTranslation` 的完整名与短名。
 
 本机是 Windows，没有 Xcode / Swift 工具链：Swift 单测**没有编译、没有运行**，只做了静态核对。跑通的是 `scripts/test-ios-key-layout-settings.py`（32 项）、`test-ios-settings-group-header-linkage`、`test-ios-settings-save-failure`、`test-ios-account-settings-lifecycle`、`test-preference-suite-cleanup`、`test-android-preference-keys`、`test-preferences-intersection-parity` 与 `git diff --check`。需要在 macOS 上跑 `MSIMEKeyboardTests`，并在真机验收：组字时上滑空格上屏译文（中文词与英文词各一次）、没有译文时不动作、空格左右拖光标仍正常、底行各键上下滑不误触横滑移光标。
+
+- 设置页预览图里的底行也可以点了（`KeyboardSkinPreview.onBottomKeyTap`）：空格、中/英、符、表情、回车、逗号、句号分别打开 `BottomKeySwipeEditorSheet`，与点字母键进逐键编辑同一条路；123、地球和 0 不是可配的底行键，点了不响应。原先只有列表里的入口，验收时「点预览图的空格没反应」被当成缺陷。
+
+## 验收期的临时默认值
+
+未签名包拿不到 App Group，设置页写的那份键盘读不到，所以验收期间三处默认值是临时的，验收通过后一起改回：
+
+- `CandidateTranslationPreference.forcedOnForTesting = true`：强制打开「候选词翻译」与释义行（`KeyboardViewController` 的镜像、`MetasequoiaInputSessionBridge.hostOverrides` 两处引用），否则空格上滑的「上屏候选译文」没有东西可上屏。
+- `CandidatePanelStylePreference.fallbackStyle = .system`：没有存值时按系统样式画展开的候选面板，才能验英文候选不跨列与整行高度。
+- `LetterSwipePreference.testingDefaults`：上面那几个键的下滑动作，发版前整段删掉。
 
 ## Related notes
 
