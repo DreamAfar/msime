@@ -906,7 +906,7 @@ enum LetterHoldPreference {
     if let tones { items.append(contentsOf: tones.map(String.init)) }
     if !chinese {
       if let superscript = superscripts[character] { items.append(superscript) }
-      if let subscript = subscripts[character] { items.append(subscript) }
+      if let lowered = subscripts[character] { items.append(lowered) }
     }
     return normalize(items)
   }
