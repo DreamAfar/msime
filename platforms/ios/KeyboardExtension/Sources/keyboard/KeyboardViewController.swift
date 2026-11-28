@@ -1433,7 +1433,9 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     let preferences = session.sharedPreferences ?? MetasequoiaInputSessionBridge.loadSharedPreferences()
     diagnosticLogSuppressed = !privacyGate.allows(.diagnosticLog)
     let directory = session.stateDirectory ?? MetasequoiaInputSessionBridge.sharedStateDirectory
-    let enabled = DiagnosticLog.isEnabled(in: preferences) && !diagnosticLogSuppressed
+    // 测试期专用：未签名包读不到设置 App 写的开关，`KeyboardTestingDefaults` 直接把它当作开着（见该文件的说明，PR 前删除）。
+    let enabled = (KeyboardTestingDefaults.diagnosticLog || DiagnosticLog.isEnabled(in: preferences))
+      && !diagnosticLogSuppressed
     DiagnosticLog.shared.configure(directory: directory, enabled: enabled)
     // 探针的启停跟着日志：隐私模式、凭据输入框和开关关闭时它不该常驻。`viewWillDisappear` 收起键盘时另外停一次。
     mainThreadProbe.setEnabled(enabled)

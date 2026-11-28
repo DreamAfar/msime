@@ -23,6 +23,14 @@ final class DiagnosticLog: @unchecked Sendable {
   static let fileName = "diagnostic.log"
   static let maxBytes = 1024 * 1024
   static let maxEventBytes = 192
+  /// 测试期专用：未签名 IPA 用免费账号重签后没有 App Group，App 里的「分享诊断日志」读的是 App 自己的容器，
+  /// 看不到键盘扩展写在扩展容器里的这份文件。把同一条记录再用 `NSLog` 打一份到系统日志，
+  /// 桌面上用爱思助手、3uTools 或 `idevicesyslog` 的实时日志就能抓。开 PR 前连同 `write` 里那三行一起删掉。
+  ///
+  /// 只在扩展进程里打：App 自己写的日志 App 本来就读得到，单元测试宿主也不必往 CI 日志里刷一遍。
+  static var mirrorsToSystemLog: Bool { Bundle.main.bundlePath.hasSuffix(".appex") }
+  /// 系统日志逐行同步写要几十微秒到几毫秒，而这份日志正是用来量启动耗时的。镜像排到后台队列，写文件照旧在调用线程完成。
+  private static let mirrorQueue = DispatchQueue(label: "app.msime.ios.diagnostic-mirror", qos: .utility)
 
   private static func rejectsSymlinkAncestors(_ path: URL) -> Bool {
     SafePath.hasRefusedSymbolicLink(path)
@@ -102,7 +110,12 @@ final class DiagnosticLog: @unchecked Sendable {
       try? manager.moveItem(at: file, to: rotated)
     }
     let stamp = Self.formatter.string(from: Date())
-    let record = Data("\(stamp) [p\(ProcessInfo.processInfo.processIdentifier)] \(Self.sanitize(event))\n".utf8)
+    let line = "\(stamp) [p\(ProcessInfo.processInfo.processIdentifier)] \(Self.sanitize(event))"
+    // 测试期专用：与上面的文件各写一份，App 容器读不到时还能从系统日志里拿到（见 `mirrorsToSystemLog`）。
+    if Self.mirrorsToSystemLog {
+      Self.mirrorQueue.async { NSLog("%@", line) }
+    }
+    let record = Data((line + "\n").utf8)
     if !manager.fileExists(atPath: file.path) {
       manager.createFile(atPath: file.path, contents: nil, attributes: [.posixPermissions: 0o600])
     }
