@@ -24,11 +24,17 @@ final class DiagnosticLog: @unchecked Sendable {
   static let maxBytes = 1024 * 1024
   static let maxEventBytes = 192
   /// 测试期专用：未签名 IPA 用免费账号重签后没有 App Group，App 里的「分享诊断日志」读的是 App 自己的容器，
-  /// 看不到键盘扩展写在扩展容器里的这份文件。把同一条记录再用 `NSLog` 打一份到系统日志，
-  /// 桌面上用爱思助手、3uTools 或 `idevicesyslog` 的实时日志就能抓。开 PR 前连同 `write` 里那三行一起删掉。
+  /// 看不到键盘扩展写在扩展容器里的这份文件。把同一条记录再用统一日志（`os.Logger`）打一份，
+  /// 桌面上用爱思助手、3uTools 的实时日志，或 Mac 上的 Console 就能抓。开 PR 前连同 `write` 里那段一起删掉。
+  ///
+  /// 不用 `NSLog`：现代 iOS 上它不一定再转发给 syslog 中继，实测爱思助手的实时日志里只有同一进程的
+  /// `UIKitCore` 记录，看不到 `NSLog`。`Logger` 写的就是这些工具在显示的那套统一日志。
   ///
   /// 只在扩展进程里打：App 自己写的日志 App 本来就读得到，单元测试宿主也不必往 CI 日志里刷一遍。
   static var mirrorsToSystemLog: Bool { Bundle.main.bundlePath.hasSuffix(".appex") }
+  private static let mirrorLogger = Logger(subsystem: "app.msime.ios.keyboard", category: "diagnostic")
+  /// 系统日志逐行同步写要几十微秒到几毫秒，而这份日志正是用来量启动耗时的。镜像排到后台队列，写文件照旧在调用线程完成。
+  private static let mirrorQueue = DispatchQueue(label: "app.msime.ios.diagnostic-mirror", qos: .utility)
   /// 系统日志逐行同步写要几十微秒到几毫秒，而这份日志正是用来量启动耗时的。镜像排到后台队列，写文件照旧在调用线程完成。
   private static let mirrorQueue = DispatchQueue(label: "app.msime.ios.diagnostic-mirror", qos: .utility)
 
@@ -64,6 +70,9 @@ final class DiagnosticLog: @unchecked Sendable {
 
   private let lock = NSLock()
   private var file: URL?
+  /// 测试期专用的系统日志镜像是否开着。与 `file` 分开：目录不可写时仍然能在统一日志里看到记录，
+  /// 否则「一条都没有」既可能是开关没开，也可能是路径不对，设备上分不出来。
+  private var mirroringToSystemLog = false
 
   /// Whether `diagnostic_log.server` is on in a shared preference document. Only a real boolean counts, as on macOS.
   static func isEnabled(in preferences: [String: Any]?) -> Bool {
@@ -94,10 +103,19 @@ final class DiagnosticLog: @unchecked Sendable {
   func configure(directory: String?, enabled: Bool) {
     lock.lock(); defer { lock.unlock() }
     file = enabled ? directory.flatMap(Self.url(in:)) : nil
+    mirroringToSystemLog = enabled && Self.mirrorsToSystemLog
   }
 
   func write(_ event: String) {
     lock.lock(); defer { lock.unlock() }
+    // 行文本先算出来：镜像和文件写的是同一条记录，时间戳与 pid 必须一致。
+    let stamp = Self.formatter.string(from: Date())
+    let line = "\(stamp) [p\(ProcessInfo.processInfo.processIdentifier)] \(Self.sanitize(event))"
+    // 测试期专用：统一日志（`Logger`）是爱思助手、3uTools、Console 都能读到的通道；
+    // `NSLog` 在现代 iOS 上不一定再转发给 syslog 中继，所以不用它。排到后台队列，不占启动测量。
+    if mirroringToSystemLog {
+      Self.mirrorQueue.async { Self.mirrorLogger.notice("\(line, privacy: .public)") }
+    }
     guard let file else { return }
     guard !Self.rejectsSymlinkAncestors(file) else { return }
     let manager = FileManager.default
@@ -108,12 +126,6 @@ final class DiagnosticLog: @unchecked Sendable {
       let rotated = file.appendingPathExtension("1")
       try? manager.removeItem(at: rotated)
       try? manager.moveItem(at: file, to: rotated)
-    }
-    let stamp = Self.formatter.string(from: Date())
-    let line = "\(stamp) [p\(ProcessInfo.processInfo.processIdentifier)] \(Self.sanitize(event))"
-    // 测试期专用：与上面的文件各写一份，App 容器读不到时还能从系统日志里拿到（见 `mirrorsToSystemLog`）。
-    if Self.mirrorsToSystemLog {
-      Self.mirrorQueue.async { NSLog("%@", line) }
     }
     let record = Data((line + "\n").utf8)
     if !manager.fileExists(atPath: file.path) {
