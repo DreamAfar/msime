@@ -65,6 +65,13 @@ final class KeyboardMemoryTests: XCTestCase {
     return values
   }
 
+  /// 日志里 `event` 最后一行 `event ` 之后的部分；用于 `keyboard_spans` 这种整行都是 `name:毫秒` 的记录。
+  private func remainder(after event: String, in lines: [String]) throws -> String {
+    let line = try XCTUnwrap(lines.last { $0.contains("] \(event) ") }, "no \(event) line in \(lines)")
+    let range = try XCTUnwrap(line.range(of: "] \(event) "))
+    return String(line[range.upperBound...])
+  }
+
   /// 内存读数的两个字段都在：`mem` 是整数，`avail` 是整数或表示系统没给出余量的 `-`。
   private func assertMemoryFields(_ values: [String: String], _ event: String, file: StaticString = #filePath, line: UInt = #line) {
     XCTAssertNotNil(values["mem"].flatMap { UInt64($0) }, "\(event) has no mem", file: file, line: line)
@@ -240,24 +247,27 @@ final class KeyboardMemoryTests: XCTestCase {
       "the keyboard's launch grew past the regression budget; see the per-stage numbers above")
     // 启动各段的分开计时：建界面和第一帧一定是毫秒数，准备运行时和重建会话没发生才允许是 `-`。
     let timing = try fields("keyboard_timing", in: lines)
-    for key in ["built_ms", "first_frame_ms"] {
+    for key in ["built_ms", "first_frame_ms", "will_appear_ms"] {
       XCTAssertNotNil(timing[key].flatMap { UInt64($0) }, "keyboard_timing has no \(key): \(timing)")
     }
     for key in ["prepare_ms", "resume_ms"] {
       XCTAssertTrue(timing[key] == "-" || timing[key].flatMap { UInt64($0) } != nil,
                     "keyboard_timing has \(key)=\(timing[key] ?? "nil")")
     }
-    // 首帧前那一段的分段：出现准备、窗口换装、布局都是毫秒数（没走到的记 0），整棵键盘的排布次数和累计排布时间一定有。
-    for key in ["will_appear_ms", "window_skin_ms", "layout_ms", "layout_total_ms", "layouts"] {
-      XCTAssertNotNil(timing[key].flatMap { UInt64($0) }, "keyboard_timing has no \(key): \(timing)")
+    // 阶段单独一行：出现准备、窗口换装、布局都是毫秒数（没走到的记 0），整棵键盘的排布次数和累计排布时间一定有。
+    // 与 `keyboard_timing` 分开是因为每条记录截到 192 字节，合在一起时 `will_spans` 会在设备上被静静砍掉。
+    let phases = try fields("keyboard_phases", in: lines)
+    for key in ["window_skin_ms", "layout_ms", "layout_total_ms", "layouts"] {
+      XCTAssertNotNil(phases[key].flatMap { UInt64($0) }, "keyboard_phases has no \(key): \(phases)")
     }
-    // `will_spans` 是 `theme:12,prefs:40,…` 这样的一行，每段都带毫秒数。
-    let spans = (timing["will_spans"] ?? "").split(separator: ",")
-    XCTAssertFalse(spans.isEmpty, "keyboard_timing has no will_spans: \(timing)")
+    // `keyboard_spans` 是一行 `theme:12,prefs:40,…`，每段都带毫秒数。
+    let spanLine = try remainder(after: "keyboard_spans", in: lines)
+    let spans = spanLine.split(separator: ",")
+    XCTAssertFalse(spans.isEmpty, "keyboard_spans is empty: \(spanLine)")
     for span in spans {
       let parts = span.split(separator: ":")
-      XCTAssertEqual(parts.count, 2, "will_spans entry \(span)")
-      XCTAssertNotNil(parts.last.flatMap { UInt64($0) }, "will_spans entry \(span)")
+      XCTAssertEqual(parts.count, 2, "keyboard_spans entry \(span)")
+      XCTAssertNotNil(parts.last.flatMap { UInt64($0) }, "keyboard_spans entry \(span)")
     }
   }
 

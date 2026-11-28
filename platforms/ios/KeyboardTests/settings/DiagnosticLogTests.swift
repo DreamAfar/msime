@@ -62,6 +62,14 @@ final class DiagnosticLogTests: XCTestCase {
     XCTAssertEqual(DiagnosticLog.sanitize(String(repeating: "x", count: 500)).utf8.count, DiagnosticLog.maxEventBytes)
   }
 
+  /// 超长记录仍截到 192 字节，但末尾留 `~truncated`：字段被砍掉时日志里要看得出来，否则和「这段没走到」分不开。
+  func testOverlongRecordsMarkTheTruncation() {
+    let body = DiagnosticLog.recordBody(String(repeating: "x", count: 500))
+    XCTAssertEqual(body.utf8.count, DiagnosticLog.maxEventBytes)
+    XCTAssertTrue(body.hasSuffix(" ~truncated"), body)
+    XCTAssertEqual(DiagnosticLog.recordBody("focus_in"), "focus_in")
+  }
+
   /// Off writes nothing; on appends one owner-only line per event; off again stops.
   func testWritesOnlyWhileEnabled() throws {
     log.configure(directory: state.path, enabled: false)

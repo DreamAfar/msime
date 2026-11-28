@@ -1158,7 +1158,12 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     DiagnosticLog.shared.write("keyboard_shown \(DiagnosticLog.MemorySample.current().fields) \(memoryParts)")
     if drawsFirstFrame {
       // 启动各段分开记：`prepare_ms` 是桥里量的 `msimeClientPrepareHost`（校验资源、搬辅助码表、写运行时选项），`built_ms` 是建完整套键盘界面，`first_frame_ms` 从 `viewDidLoad` 起算到这一行，`resume_ms` 是 `viewWillAppear` 里重建词库会话。只有分开才知道该先减哪一段，也才能核对首帧之前的内存警告有没有被合并。这次出现的后续再出现只写 `keyboard_shown`，不重复记启动耗时。
-      DiagnosticLog.shared.write("keyboard_timing prepare_ms=\(session.hostPrepareMilliseconds.map { String($0) } ?? "-") built_ms=\(builtMilliseconds) first_frame_ms=\(Self.elapsedMilliseconds(since: loadStartedAt)) will_appear_ms=\(willAppearMilliseconds) window_skin_ms=\(windowSkinMilliseconds) layout_ms=\(firstLayoutMilliseconds) layout_total_ms=\(keyboardLayoutMilliseconds) layouts=\(keyboardLayoutPasses) will_spans=\(Self.spanFields(willAppearSpans)) resume_ms=\(dictionaryResumeMilliseconds.map { String($0) } ?? "-") deferred_warnings=\(deferredMemoryWarnings)")
+      DiagnosticLog.shared.write("keyboard_timing prepare_ms=\(session.hostPrepareMilliseconds.map { String($0) } ?? "-") built_ms=\(builtMilliseconds) first_frame_ms=\(Self.elapsedMilliseconds(since: loadStartedAt)) will_appear_ms=\(willAppearMilliseconds) resume_ms=\(dictionaryResumeMilliseconds.map { String($0) } ?? "-") deferred_warnings=\(deferredMemoryWarnings)")
+      // 每条记录由 `DiagnosticLog` 截到 192 字节。字段一多就会静默砍尾巴——设备上这行原本还带着
+      // `will_spans`，结果只写到 `sync:` 就断了，后半段既不在日志里，也不像「没走到」。阶段和分段各占一行，
+      // 每行都远小于上限，再加字段也不会整段消失。
+      DiagnosticLog.shared.write("keyboard_phases window_skin_ms=\(windowSkinMilliseconds) layout_ms=\(firstLayoutMilliseconds) layout_total_ms=\(keyboardLayoutMilliseconds) layouts=\(keyboardLayoutPasses)")
+      DiagnosticLog.shared.write("keyboard_spans \(Self.spanFields(willAppearSpans))")
     }
     // UIKit may publish the document identifier and keyboard type one run-loop turn after the
     // extension appears. Refresh the first frame once those host traits are available.
@@ -1242,16 +1247,20 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   }
 
   override func viewWillAppear(_ animated: Bool) {
-    super.viewWillAppear(animated)
     // 首帧之前这几段逐段计时：`will_appear_ms` 只说这一段一共多久，设备上三百多毫秒里有近一半落在这里，
     // 不拆开就只能靠猜哪块该减。只量这一次出现的第一帧，之后每次出现不再记。
-    var spanMark = ProcessInfo.processInfo.systemUptime
+    //
+    // 起点取「`viewDidLoad` 结束」那一刻，第一段 `enter` 量的是 UIKit 建完界面之后、把这次出现交回给我们之前
+    // （含 `super`）花掉的时间：`built_ms` 与 `will_appear_ms` 之差并不全是这段代码花的，先把它分开再谈优化。
+    var spanMark = loadStartedAt + Double(builtMilliseconds) / 1000
     func noteSpan(_ name: String) {
       guard !hasDrawnFirstFrame else { return }
       let now = ProcessInfo.processInfo.systemUptime
       willAppearSpans.append((name: name, milliseconds: Int(((now - spanMark) * 1000).rounded())))
       spanMark = now
     }
+    super.viewWillAppear(animated)
+    noteSpan("enter")
     clipboardHistoryPreferencesReady = false
     candidateCanvasActive = true
     isPresented = true
@@ -1309,6 +1318,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     inlineMarkedText = ""
     if schemePicker != nil { closeKeyboardPicker() }
     synchronizeInputContext()
+    // 读宿主上下文要跨进程问 `textDocumentProxy`，首帧前宿主可能还没就绪；单独一段，不和偏好重放混在一起。
+    noteSpan("context")
     synchronizeInputSchemePreference()
     synchronizeChineseOutputPreference()
     applyLearningPreferences()
@@ -1318,7 +1329,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     bilingualGlideEnabled = KeyboardLayoutPreference.bilingualGlide
     // 完全访问和按键音开关都可能在两次出现之间变了；包先按会话手上的文档开始加载，重读之后选择变了再换。
     synchronizeKeySoundPack()
-    noteSpan("sync")
+    noteSpan("prefsync")
     // The Tauri settings app writes the shared PreferencesStore rather than the
     // legacy App Group UserDefaults used by the old SwiftUI settings page.
     // Reload it off-thread so a fuzzy-pinyin change is visible the next time
@@ -1399,7 +1410,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     Int(((ProcessInfo.processInfo.systemUptime - start) * 1000).rounded())
   }
 
-  /// `willAppearSpans` 写成 `theme:12,prefs:40,…`，给 `keyboard_timing` 用。用逗号隔开：日志的字段之间是空格，
+  /// `willAppearSpans` 写成 `theme:12,prefs:40,…`，给 `keyboard_spans` 用。用逗号隔开：日志的字段之间是空格，
   /// 用空格分出的后半截会被读日志的人和脚本当成另外几个字段。
   private static func spanFields(_ spans: [(name: String, milliseconds: Int)]) -> String {
     spans.map { "\($0.name):\($0.milliseconds)" }.joined(separator: ",")

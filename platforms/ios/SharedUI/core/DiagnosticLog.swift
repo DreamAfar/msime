@@ -82,9 +82,17 @@ final class DiagnosticLog: @unchecked Sendable {
     directory.hasPrefix("/") ? URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent(fileName) : nil
   }
 
-  /// Printable ASCII only, cut to `maxEventBytes`; anything else becomes `?`.
-  static func sanitize(_ event: String) -> String {
-    String(decoding: event.utf8.prefix(maxEventBytes).map { (0x20...0x7e).contains($0) ? $0 : UInt8(ascii: "?") }, as: UTF8.self)
+  /// Printable ASCII only, cut to `limit`; anything else becomes `?`.
+  static func sanitize(_ event: String, limit: Int = maxEventBytes) -> String {
+    String(decoding: event.utf8.prefix(limit).map { (0x20...0x7e).contains($0) ? $0 : UInt8(ascii: "?") }, as: UTF8.self)
+  }
+
+  /// 记录正文。超长时截断并留一个 `~truncated`：`sanitize` 只按字节切，切掉的尾巴在日志里和「这段没走到」
+  /// 长得一样——设备上有一行 `will_spans` 就是这么只写到一半的。留个标记，读日志的人才知道后面还有内容。
+  static func recordBody(_ event: String) -> String {
+    let marker = " ~truncated"
+    guard event.utf8.count > maxEventBytes else { return sanitize(event) }
+    return sanitize(event, limit: maxEventBytes - marker.utf8.count) + marker
   }
 
   /// Route host-api's own diagnostic lines (`<category>: <detail>`, see `msime_client_set_diagnostic_sink`) into this log as `host_api: <category>`, as the macOS input method does. Only the category is kept: it is a fixed English phrase, while the detail can hold a pack id, a path or an error text. Among them is the line saying which keystroke reranker 整句联想「增强」 attached (`keyboard reranker onnx large` and so on). The sink is process-wide and set once; lines arriving while the log is off are dropped like every other record, so the line from the first session of a keyboard process, created before the log is configured, only shows up for later sessions and switch changes.
@@ -108,7 +116,7 @@ final class DiagnosticLog: @unchecked Sendable {
     lock.lock(); defer { lock.unlock() }
     // 行文本先算出来：镜像和文件写的是同一条记录，时间戳与 pid 必须一致。
     let stamp = Self.formatter.string(from: Date())
-    let line = "\(stamp) [p\(ProcessInfo.processInfo.processIdentifier)] \(Self.sanitize(event))"
+    let line = "\(stamp) [p\(ProcessInfo.processInfo.processIdentifier)] \(Self.recordBody(event))"
     // 测试期专用：统一日志（`Logger`）是爱思助手、3uTools、Console 都能读到的通道；
     // `NSLog` 在现代 iOS 上不一定再转发给 syslog 中继，所以不用它。排到后台队列，不占启动测量。
     if mirroringToSystemLog {
