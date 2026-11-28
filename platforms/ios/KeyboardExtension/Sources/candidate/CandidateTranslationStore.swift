@@ -149,6 +149,8 @@ final class CandidateTranslationStore {
     cancelSingle()
     cache.removeAll(keepingCapacity: false)
   }
+  /// 缓存里的译文条数，只给诊断日志用：常驻内存里这一块没有别的读数，键盘被杀时日志要能说出它当时有多少条。
+  var cachedEntries: Int { cache.count }
   /// 释义卡片打开时为长按的那一个候选请求一次译文：不等打字停顿，也不改候选条那一页的请求状态，所以候选条随后的刷新不会把它取消。已经有译文的语言不再请求，和候选条一样跳过不翻译的来源和不含汉字的候选；失败不重试。返回是否发出了请求。
   @discardableResult
   func requestSingle(word: String, source: Int, codes: [String]) -> Bool {

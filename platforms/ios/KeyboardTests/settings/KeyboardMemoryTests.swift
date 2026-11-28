@@ -80,6 +80,8 @@ final class KeyboardMemoryTests: XCTestCase {
     controller.view.frame = CGRect(x: 0, y: 0, width: 390, height: KeyboardViewController.defaultKeyboardHeight)
     controller.viewWillAppear(false)
     controller.view.layoutIfNeeded()
+    // 第一帧之前的内存警告只合并、不释放（见 `testMemoryWarningsBeforeTheFirstFrameAreDeferred`），这些用例量的是键盘显示之后的行为，所以先把第一帧走完。
+    controller.viewDidAppear(false)
     return controller
   }
 
@@ -236,6 +238,33 @@ final class KeyboardMemoryTests: XCTestCase {
     // 2026-10-10 在 iOS 27.0 的 13 英寸 iPad Pro 模拟器上冷进程实测从 `base` 到 `keyboard_shown` 约 20 MiB；上限取它的三倍，只拦突然翻倍的那种回归。
     XCTAssertLessThan(afterShow - min(afterShow, base), 60,
       "the keyboard's launch grew past the regression budget; see the per-stage numbers above")
+    // 启动各段的分开计时：建界面和第一帧一定是毫秒数，准备运行时和重建会话没发生才允许是 `-`。
+    let timing = try fields("keyboard_timing", in: lines)
+    for key in ["built_ms", "first_frame_ms"] {
+      XCTAssertNotNil(timing[key].flatMap { UInt64($0) }, "keyboard_timing has no \(key): \(timing)")
+    }
+    for key in ["prepare_ms", "resume_ms"] {
+      XCTAssertTrue(timing[key] == "-" || timing[key].flatMap { UInt64($0) } != nil,
+                    "keyboard_timing has \(key)=\(timing[key] ?? "nil")")
+    }
+  }
+
+  /// 第一帧之前的内存警告只合并、不释放：那之前面板打不开，释义、翻译和候选画布的缓存都是空的，按键音还在加载，全量释放只会把首帧正要用的缓存清掉、再在首帧里建一遍。日志写明合并了几次，并且没有 `memory_released`。
+  func testMemoryWarningsBeforeTheFirstFrameAreDeferred() throws {
+    let lines = try withSharedLog {
+      enableAllInputSchemes()
+      InputSchemePreference.scheme = .quanpin
+      let controller = KeyboardViewController()
+      controller.loadViewIfNeeded()
+      controller.view.frame = CGRect(x: 0, y: 0, width: 390, height: KeyboardViewController.defaultKeyboardHeight)
+      controller.viewWillAppear(false)
+      controller.view.layoutIfNeeded()
+      controller.didReceiveMemoryWarning()
+      controller.didReceiveMemoryWarning()
+      controller.viewWillDisappear(false)
+    }
+    XCTAssertTrue(lines.contains { $0.contains("] memory_warning suppressed=2 ") }, "\(lines)")
+    XCTAssertFalse(lines.contains { $0.contains("] memory_released ") }, "\(lines)")
   }
 
   // MARK: - 重新加载

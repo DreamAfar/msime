@@ -634,6 +634,8 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   /// The session reads the App Group document rather than a test's own directory, so its writes are the user's settings changes that cloud sync uploads.
   private let sharesStateRoot: Bool
   private var initializationDiagnostic: String?
+  /// `msimeClientPrepareHost` 花的时间（毫秒）。资源校验、把辅助码表搬进状态根、写运行时选项都在这一段里，键盘启动时间的一大半通常落在这里而不是建界面。键盘把它写进 `keyboard_timing`，设备上据此判断该先减哪一段；准备失败或还没准备时为 nil。
+  private(set) var hostPrepareMilliseconds: Int?
   private var revision: UInt64 = 0
   /// The shared document's revision as this bridge last saw it.
   ///
@@ -682,8 +684,10 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
         bootstrap["read_only_state"] = true
         bootstrap["private_root"] = (privateRoot ?? Self.readOnlyPrivateRoot).path
       }
+      let prepareStarted = ProcessInfo.processInfo.systemUptime
       options = try Self.callOptions(msimeClientPrepareHost,
                                      bootstrap)
+      hostPrepareMilliseconds = Int(((ProcessInfo.processInfo.systemUptime - prepareStarted) * 1000).rounded())
       self.stateRoot = options["preferences_directory"] as? String
         ?? bootstrap["state_root"] as? String
       options["preferences"] = Self.hostOverrides(
@@ -744,8 +748,26 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   /// Reload the canonical PreferencesStore written by the Tauri settings host.
   /// Disk and lock work stays off the keyboard thread; the accepted snapshot is
   /// applied on the session's owning (main) thread before the callback returns.
+  /// 重载共享文档的结果。键盘要据此分清「读不到」和「和已应用的一样」：前者不能当成就绪，后者不需要再跑一遍重放。
+  enum PreferencesReload: Equatable {
+    /// 文档比这个进程已经应用的新，偏好、镜像和外观都按它重放一遍。
+    case applied(UInt64)
+    /// 文档与已经应用的那版相同。偏好本来就是这份，剪贴板历史这类「文档到了才启用」的行为可以照常启用，但十几个 `synchronize*` 一个字段也不会改。
+    case unchanged(UInt64)
+    /// 会话已经销毁、读盘失败或活会话没有接受这次更新。
+    case unavailable
+  }
+
+  /// 旧的布尔回调：`true` 表示偏好可用（新应用或本来就是这个版本），`false` 表示读不到。
   func reloadSharedPreferences(completion: @escaping (Bool) -> Void) {
-    guard handle != 0, let stateRoot else { completion(false); return }
+    reloadSharedPreferencesReportingOutcome { outcome in
+      completion(outcome != .unavailable)
+    }
+  }
+
+  /// 带结果的重载。文档没变时也要把「偏好可用」和「需要重放」分开：每次出现都重放，这一轮正好排在首帧之后，用户按下去就是「没反应」。
+  func reloadSharedPreferencesReportingOutcome(completion: @escaping (PreferencesReload) -> Void) {
+    guard handle != 0, let stateRoot else { completion(.unavailable); return }
     let path = Data(stateRoot.utf8)
     // Keep the bridge alive until the main-thread callback has applied the snapshot. A weak capture here can drop the bridge while the worker is reading, leaving callers waiting forever for a completion that is never delivered. Capturing it strongly in both closures also keeps the final release on the main queue, where the session handle is owned.
     // The visible keyboard waits on this read, so it runs at userInitiated: Darwin throttles utility-QoS disk I/O whenever other I/O is busy, and that stalled the lock and the small document read for over 15 seconds on a loaded simulator.
@@ -763,11 +785,16 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
         guard let snapshot,
               let preferences = snapshot["preferences"] as? [String: Any],
               let revision = snapshot["revision"] as? NSNumber else {
-          completion(false)
+          completion(.unavailable)
           return
         }
-        guard let revision = Self.strictUInt64(revision), revision >= self.documentRevision else {
-          completion(false)
+        guard let revision = Self.strictUInt64(revision) else {
+          completion(.unavailable)
+          return
+        }
+        // 严格大于才重放。相等表示这份文档这个进程已经应用过：`documentRevision` 只在活会话接受之后才记，没记就说明还没应用，下一次出现会重试。
+        guard revision > self.documentRevision else {
+          completion(.unchanged(revision))
           return
         }
         // 键盘可见时只更新允许热加载的引擎字段，输入方案仍由键盘宿主管理。
@@ -776,12 +803,12 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
         self.revision = max(self.revision, revision)
         // 磁盘读取期间键盘可能收起、会话可能销毁。直到活会话接受更新，才记录已读的文档，否则下次出现时要重试。
         guard self.applyAppEditedPreferences(from: overridden, over: applied) else {
-          completion(false)
+          completion(.unavailable)
           return
         }
         self.options["preferences"] = overridden
         self.documentRevision = revision
-        completion(true)
+        completion(.applied(revision))
       }
     }
   }

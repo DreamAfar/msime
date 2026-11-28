@@ -33,6 +33,24 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     CGFloat(KeyboardLayoutPreference.heightAdjustment)
   /// 准备引擎选项之前的内存读数。存储属性按声明顺序初始化：前面几个属性（皮肤背景视图、读 App Group 的键盘高度）算进它自己，`keyboard_loaded` 把它记成 `base=`。`session` 到 `viewDidLoad` 才准备，所以与 `session=` 之差除了准备选项（读文档、校验资源），还有其余存储属性和 `loadView` 的开销。
   private let launchMemory = DiagnosticLog.MemorySample.current()
+  /// `viewDidLoad` 开始的时刻（`systemUptime`）。`keyboard_timing` 行用它量建界面与第一帧各花多久，和桥里量的 `msimeClientPrepareHost` 分开记：启动时间到底落在准备运行时还是建界面，要这两段分开才看得出来。
+  private var loadStartedAt: TimeInterval = 0
+  /// `viewDidLoad` 从开始到写完 `keyboard_built` 的毫秒数。
+  private var builtMilliseconds = 0
+  /// `viewWillAppear` 里重建词库会话的毫秒数；这次出现没有重建（会话还在）时为 nil。
+  private var dictionaryResumeMilliseconds: Int?
+  /// 键盘是否已经画出第一帧（`viewDidAppear` 走到过半）。第一帧之前系统就可能连着发内存警告，那时全量释放只会把正要用的缓存清掉，见 `didReceiveMemoryWarning`。
+  private var hasDrawnFirstFrame = false
+  /// 第一帧之前被合并掉的内存警告次数，写进下一条 `memory_warning`，设备上据此判断这次唤起挨了多少次压力。
+  private var deferredMemoryWarnings = 0
+  /// 第一帧之前的内存警告只合并、不释放，最多等这么久；键盘被挡住、始终没出现时不能把扩展留在高占用上，过了这个窗口就回到原来的全量释放。
+  nonisolated static let launchMemoryPressureWindow: TimeInterval = 2
+  /// 主线程卡顿探针。键盘「已经显示出来，但按下去没反应」不在任何一段耗时里，只有主线程被占住才解释得通；它把卡住的时长和当时的阶段写进日志。
+  private let mainThreadProbe = KeyboardMainThreadProbe()
+  /// 第一帧的时刻（`systemUptime`）。首键、偏好重放、第一次空闲都以它为起点，设备上据此判断键盘显示之后还有多久在忙。
+  private var firstFrameAt: TimeInterval?
+  /// 首键只在这一次出现里记一行；换输入框、连续打字不再记。
+  private var firstKeyReported = false
   /// 这里只准备选项、不建会话：会话一建就在 App Group 里持着词库租约和下载代次的锁，控制器创建时键盘还没出现，也可能永远不出现，进程那时被挂起，iOS 以 0xdead10cc 结束扩展（#10634）。会话在 `viewWillAppear` 里建，在 `viewWillDisappear` 里销毁，锁的持有期不超过键盘的可见期。
   ///
   /// 第一次用到时才准备（`viewDidLoad` 一开始），那时 `hasFullAccess` 已经可信：没有完全访问时 App Group 只读，可写的准备第一步就以 EPERM 失败，键盘打不了字（#10945），所以这时选只读的准备。iOS 在用户切换完全访问时结束扩展进程，进程活着时这个值不变。
@@ -1013,6 +1031,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   }
 
   override func viewDidLoad() {
+    loadStartedAt = ProcessInfo.processInfo.systemUptime
     super.viewDidLoad()
     registerForTraitChanges([UITraitUserInterfaceStyle.self, UITraitHorizontalSizeClass.self]) {
       (controller: KeyboardViewController, previous: UITraitCollection) in controller.refreshTraits(previous)
@@ -1047,6 +1066,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     incognito = KeyboardPrivacyPreference.incognito
     readGesturePreferences()
     configureDiagnosticLog()
+    // 探针跟着日志开关走，`configureDiagnosticLog` 里统一启停；这里只把阶段标到「建界面」。
+    mainThreadProbe.mark("build")
     DiagnosticLog.forwardHostLines()
     DiagnosticLog.shared.write("keyboard_loaded full_access=\(hasFullAccess ? 1 : 0) idiom=\(UIDevice.current.userInterfaceIdiom == .pad ? "pad" : "phone") base=\(DiagnosticLog.MemorySample.mebibytes(launchMemory.footprint)) session=\(DiagnosticLog.MemorySample.mebibytes(sessionMemory.footprint)) \(loadedMemory.fields)")
     if session.initializationFailed { DiagnosticLog.shared.write("runtime_initialization_failed") }
@@ -1097,6 +1118,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     NotificationCenter.default.addObserver(
       self, selector: #selector(noteSessionInBackground), name: .NSExtensionHostDidEnterBackground, object: nil)
     DiagnosticLog.shared.write("keyboard_built \(DiagnosticLog.MemorySample.current().fields)")
+    builtMilliseconds = Self.elapsedMilliseconds(since: loadStartedAt)
   }
 
   override func viewDidAppear(_ animated: Bool) {
@@ -1105,7 +1127,16 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     // 发布了联网语音服务时先把麦克风的网页载好，开始说话时不用再等；不录音时麦克风不开。
     if KeyboardVoiceService.configuration() != nil { _ = preparedVoiceMicrophone() }
     // 到这里键盘已经画出第一帧，视图的位图缓冲和皮肤图片都已分配；`keyboard_built` 之前的几行量不到这部分。
-    DiagnosticLog.shared.write("keyboard_shown \(DiagnosticLog.MemorySample.current().fields)")
+    let drawsFirstFrame = !hasDrawnFirstFrame
+    hasDrawnFirstFrame = true
+    mainThreadProbe.mark("first_frame")
+    let firstFrame = ProcessInfo.processInfo.systemUptime
+    if drawsFirstFrame { firstFrameAt = firstFrame }
+    DiagnosticLog.shared.write("keyboard_shown \(DiagnosticLog.MemorySample.current().fields) \(memoryParts)")
+    if drawsFirstFrame {
+      // 启动各段分开记：`prepare_ms` 是桥里量的 `msimeClientPrepareHost`（校验资源、搬辅助码表、写运行时选项），`built_ms` 是建完整套键盘界面，`first_frame_ms` 从 `viewDidLoad` 起算到这一行，`resume_ms` 是 `viewWillAppear` 里重建词库会话。只有分开才知道该先减哪一段，也才能核对首帧之前的内存警告有没有被合并。这次出现的后续再出现只写 `keyboard_shown`，不重复记启动耗时。
+      DiagnosticLog.shared.write("keyboard_timing prepare_ms=\(session.hostPrepareMilliseconds.map { String($0) } ?? "-") built_ms=\(builtMilliseconds) first_frame_ms=\(Self.elapsedMilliseconds(since: loadStartedAt)) resume_ms=\(dictionaryResumeMilliseconds.map { String($0) } ?? "-") deferred_warnings=\(deferredMemoryWarnings)")
+    }
     // UIKit may publish the document identifier and keyboard type one run-loop turn after the
     // extension appears. Refresh the first frame once those host traits are available.
     DispatchQueue.main.async { [weak self] in
@@ -1123,8 +1154,15 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
                                 candidates: self.visibleEmailSuffixes.isEmpty ? self.visibleCandidates : [],
                                 prediction: self.visibleCandidatesArePrediction)
     }
+    if drawsFirstFrame {
+      // 首帧之后主线程上还排着一轮：上面那次上下文刷新、`reloadSharedPreferences` 的回调、词库维护。这个空 block 排在它们之后，它跑起来的时刻就是主线程腾出手来的时刻；与 `first_frame_ms` 相减，就是「键盘已经看得见、但下一次触摸还要等多久」。偏好重放更晚时由 `preferences_applied` 的 `ms=` 补上。
+      DispatchQueue.main.async {
+        DiagnosticLog.shared.write("first_frame_idle ms=\(Self.elapsedMilliseconds(since: firstFrame))")
+      }
+    }
     synchronizeInputContext()
     prepareKeyFeedback()
+    mainThreadProbe.mark("after_first_frame")
     // 收起之后才到的 `viewDidAppear` 不再开始维护：`viewWillDisappear` 已经停了定时器、放了锁，这里再开一轮会把锁重新取回来，而键盘已经不在屏幕上。
     guard isPresented else { return }
     cloudClipboardAutoReceive.start { [weak self] in
@@ -1207,12 +1245,15 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     KeyboardUsageReporting.presented(fullAccess: hasFullAccess)
     // 收起时销毁的会话在这里同步重建，挡在这次出现的第一帧前面；记下耗时，在设备上看它有多重。
     let rebuildsSession = session.dictionarySessionSuspended
+    dictionaryResumeMilliseconds = nil
     appGroupLockActivity.begin { [weak self] in self?.releaseLocksBeforeSuspension() }
     let resumeStart = ProcessInfo.processInfo.systemUptime
+    mainThreadProbe.mark("session_resume")
     do {
       try session.resumeDictionarySession()
       if rebuildsSession {
-        DiagnosticLog.shared.write("dictionary_resumed ms=\(Self.elapsedMilliseconds(since: resumeStart))")
+        dictionaryResumeMilliseconds = Self.elapsedMilliseconds(since: resumeStart)
+        DiagnosticLog.shared.write("dictionary_resumed ms=\(dictionaryResumeMilliseconds ?? 0)")
         // 第一次出现之前会话还不在（#10634），`viewDidLoad` 里取到的键面提示表是空的；会话建好了再取一次。以后每次出现重建的会话方案不变，表相同，不重画。
         refreshShuangpinKeyHints()
         updateLetterCaseControls()
@@ -1240,14 +1281,27 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     // legacy App Group UserDefaults used by the old SwiftUI settings page.
     // Reload it off-thread so a fuzzy-pinyin change is visible the next time
     // the keyboard appears without blocking UIKit's input lifecycle.
-    session.reloadSharedPreferences { [weak self] loaded in
+    session.reloadSharedPreferencesReportingOutcome { [weak self] outcome in
       guard let self else { return }
-      self.clipboardHistoryPreferencesReady = loaded
+      // `unavailable` 才是没读到；`unchanged` 说明手上这份就是文档里的那版，剪贴板历史这类「文档到了才启用」的行为照常可用。
+      self.clipboardHistoryPreferencesReady = outcome != .unavailable
       self.clipboardHistoryCapture.discardIfDisallowed()
-      // Not applied also covers a document no newer than the one the session has, which is not a failure.
-      guard loaded else { DiagnosticLog.shared.write("preferences_not_applied"); return }
+      switch outcome {
+      case .unavailable:
+        DiagnosticLog.shared.write("preferences_not_applied")
+        return
+      case .unchanged(let revision):
+        // 文档与这个进程已经应用过的那版相同。下面那十几个 `synchronize*`、外观重算和候选重画一个字段也不会变，而这一轮常常正好排在首帧之后：设备上看到的就是键盘已经显示、按下去却要等一会儿。这里只记一行，跳过重复的重放。
+        DiagnosticLog.shared.write("preferences_unchanged revision=\(revision) ms=\(self.firstFrameAt.map { String(Self.elapsedMilliseconds(since: $0)) } ?? "-")")
+        self.mainThreadProbe.mark("idle")
+        return
+      case .applied:
+        break
+      }
+      self.mainThreadProbe.mark("preferences")
       self.configureDiagnosticLog()
-      DiagnosticLog.shared.write("preferences_applied \(DiagnosticLog.MemorySample.current().fields)")
+      // `ms` 从第一帧起算：偏好重放常常在键盘已经看得见之后才回来，这段时间里主线程被它占着，用户按下去就是「没反应」。
+      DiagnosticLog.shared.write("preferences_applied ms=\(self.firstFrameAt.map { String(Self.elapsedMilliseconds(since: $0)) } ?? "-") \(DiagnosticLog.MemorySample.current().fields)")
       // A candidate skin, theme or colour synced from the desktop arrives with the document.
       self.refreshCandidatePalette()
       self.applyKeyboardAppearance()
@@ -1266,6 +1320,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       }
       // The local-mode menu follows the modes the settings app leaves on.
       self.updatePreeditButton()
+      self.mainThreadProbe.mark("idle")
     }
     candidateGlossEpoch &+= 1
     candidateGlossRequestedGeneration = nil
@@ -1274,16 +1329,20 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     renderCandidateStrip()
     scheduleCandidateGlosses()
     // 换了季节必须整棵重新换装（见上面 `refreshSeason` 的注释）；否则只在皮肤变了时才在这里重走按键树，trait 和窗口外建过的按键留给 `viewIsAppearing`。
+    mainThreadProbe.mark("appearance")
     applyKeyboardSkin(onlyIfChanged: !seasonChanged)
     synchronizeReplyKeyboard()
     startCountingKeyPresses()
+    mainThreadProbe.mark("idle")
   }
 
   /// 到这里视图已经进了窗口、trait 也定了，而第一帧还没画。`viewWillAppear` 时视图通常还不在窗口里：在那里按 trait 和「有按键在窗口外装饰过」判断，`viewDidLoad` 留下的标记会让第一次出现再整棵走一遍，在窗口外走完又把标记留给下一次，每次出现都是完整换装。所以这两项在这里判断，只有确实要补的时候才换装。
   override func viewIsAppearing(_ animated: Bool) {
     super.viewIsAppearing(animated)
     if keySkinNeedsWindowPass || appliedKeySkin != KeyboardTheme.current || appliedKeySkinTraits != traitCollection {
+      mainThreadProbe.mark("window_skin")
       applyKeyboardSkin()
+      mainThreadProbe.mark("idle")
     }
   }
 
@@ -1295,7 +1354,17 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   /// iOS ends a keyboard extension that keeps using too much memory, so a warning is worth a line when a report says the keyboard vanished.
   override func didReceiveMemoryWarning() {
     super.didReceiveMemoryWarning()
-    DiagnosticLog.shared.write("memory_warning \(DiagnosticLog.MemorySample.current().fields)")
+    mainThreadProbe.mark("memory_warning")
+    // 第一帧之前系统就可能连着发内存警告：一份设备上的诊断包里 47 次唤起共 153 次，其中 149 次落在第一帧之前。那时候选面板打不开，释义、翻译和候选画布的缓存都是空的，按键音正在加载，能释放的几乎没有；照旧全量释放等于把首帧正要用的缓存清掉、再在首帧里重建一遍，还多跨一次输入线程清引擎缓存。这里只记一行，合并的次数写进 `suppressed=`，第一帧之后照常释放。键盘被挡住、迟迟没有第一帧时不能把扩展留在高占用上，过了 `launchMemoryPressureWindow` 就回到原来的做法。
+    if !hasDrawnFirstFrame,
+       ProcessInfo.processInfo.systemUptime - loadStartedAt < Self.launchMemoryPressureWindow {
+      deferredMemoryWarnings += 1
+      // 那时进程里只有正在准备的运行时和正在搭的视图，能清的缓存要么是空的、要么正是首帧要用的；去碰 `snapshotWorker` 这类懒加载对象反而会在最紧的时候把它们建出来。所以这一轮只记一行，压力真的持续下去由两秒窗口兜底。
+      DiagnosticLog.shared.write("memory_warning suppressed=\(deferredMemoryWarnings) \(DiagnosticLog.MemorySample.current().fields)")
+      return
+    }
+    DiagnosticLog.shared.write("memory_warning suppressed=\(deferredMemoryWarnings) \(DiagnosticLog.MemorySample.current().fields) \(memoryParts)")
+    deferredMemoryWarnings = 0
     // 收到警告后仍占着可选面板、释义结果或引擎候选缓存的键盘扩展很快会被系统结束。能重建的都丢掉，正在进行的组字和会话保留。
     closeKeyboardPicker()
     closeKeyboardService()
@@ -1323,7 +1392,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     candidateCanvasSkin = nil
     candidatePalette = currentCandidatePalette()
     applyCandidateAppearance()
-    DiagnosticLog.shared.write("memory_released engine_cache=\(engineCache) \(DiagnosticLog.MemorySample.current().fields)")
+    DiagnosticLog.shared.write("memory_released engine_cache=\(engineCache) \(DiagnosticLog.MemorySample.current().fields) \(memoryParts)")
+    mainThreadProbe.mark("idle")
   }
 
   /// 补上组字中那次内存警告没清的引擎缓存。只在组字刚结束时由 `render` 调用：引擎这时没有候选，清缓存返回的快照没有要画的东西，丢掉它和空闲时的警告是同一个道理。
@@ -1334,6 +1404,30 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     DiagnosticLog.shared.write("engine_cache_reset \(DiagnosticLog.MemorySample.current().fields)")
   }
 
+  /// 常驻内存的分项读数，附在 `keyboard_shown`、`focus_out`、`caches_released`、`memory_warning` 和 `memory_released` 后面。
+  ///
+  /// 单看 `mem=` 说不清哪一块占着：候选画布是一整张皮肤图，释义和译文按候选攒字符串，按键音把样本解码进播放器里。这几项都是布尔或条数，设备上对比两次出现前后的日志就知道该放哪一块，也不用把任何输入内容写进日志。
+  private var memoryParts: String {
+    "canvas=\(candidateCanvasSkin == nil ? 0 : 1) keys=\(letterButtons.count) candidates=\(visibleCandidates.count) translations=\(translations.cachedEntries) sound=\(keySounds.loaded == nil ? 0 : 1)"
+  }
+
+  /// 放掉「下次用到再重建」的纯缓存：主题解析结果、释义与译文、手写笔迹。
+  ///
+  /// 键盘扩展的常驻上限只有七十来 MB（设备日志里 `mem` 与 `avail` 相加恒为 76），后台占用高时系统直接结束扩展，用户再点输入框先看到的是系统键盘。这几块都是纯缓存，重建一次最多几十毫秒，而且只在那一次真的用到时才重建，所以收起键盘、宿主进后台时都可以放掉。
+  ///
+  /// 候选画布的皮肤图不在这里放：收起再出现时沿用已解码的那一份是有意的（见 `CandidateCanvasTests`，皮肤没变就不退回配色、也不在后台把整包图片重新解一遍）；宿主进后台时键盘还显示着，回来也未必再走一次 `viewWillAppear`，没有别的地方会重新加载它。按键音也不在这里放，后台回前台接着打字时它会静默退回系统音，那属于另一条路径。
+  private func releaseRebuildableCaches(reason: String) {
+    let before = DiagnosticLog.MemorySample.mebibytes(DiagnosticLog.MemorySample.current().footprint)
+    handwriting.clear()
+    ResolvedTheme.clearCacheForMemoryPressure()
+    candidateGlossEpoch &+= 1
+    candidateGlossRequestedGeneration = nil
+    visibleCandidateGlosses = []
+    candidateTargetGlosses = [:]
+    translations.clearCacheForMemoryPressure()
+    DiagnosticLog.shared.write("caches_released reason=\(reason) before=\(before) \(DiagnosticLog.MemorySample.current().fields) \(memoryParts)")
+  }
+
   /// `diagnostic_log.server` 开着时让诊断日志写到共享目录，关掉后停写；隐私模式和凭据输入框里同样停写（`KeyboardPrivacyGate` 的 `diagnosticLog`）。
   private func configureDiagnosticLog() {
     let preferences = session.sharedPreferences ?? MetasequoiaInputSessionBridge.loadSharedPreferences()
@@ -1341,6 +1435,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     let directory = session.stateDirectory ?? MetasequoiaInputSessionBridge.sharedStateDirectory
     let enabled = DiagnosticLog.isEnabled(in: preferences) && !diagnosticLogSuppressed
     DiagnosticLog.shared.configure(directory: directory, enabled: enabled)
+    // 探针的启停跟着日志：隐私模式、凭据输入框和开关关闭时它不该常驻。`viewWillDisappear` 收起键盘时另外停一次。
+    mainThreadProbe.setEnabled(enabled)
     // 键位几何的调试导出跟着诊断日志开关走（#10018）；刚打开时把已注册的那份补写出来，不必等布局再变。
     keyGeometryExportDirectory = enabled && directory.hasPrefix("/")
       ? URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent("debug", isDirectory: true) : nil
@@ -1483,7 +1579,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     inputDeliveryEpoch &+= 1
     englishCorrectionRejectedPrefix = ""
     finishTemporaryEnglish(force: true)
-    DiagnosticLog.shared.write("focus_out")
+    // 收起前的占用也记下来：与下一次 `focus_in` 相减就能看出这个进程在两次出现之间留下了多少（常驻越高越容易被系统结束）。
+    DiagnosticLog.shared.write("focus_out \(DiagnosticLog.MemorySample.current().fields) \(memoryParts)")
     KeyboardUsageReporting.dismissed()
     replyModel.setText("")
     // 回复面板是工具，键盘收起时跟其他面板一起关掉，下次出现回到原来的键盘。
@@ -1522,9 +1619,13 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     diagnosticDismissTimer = nil
     keyPressFlushTimer?.invalidate()
     keyPressFlushTimer = nil
+    // 收起之后这个进程可能还要在后台留很久，而下次出现本来就要按偏好在后台重载按键音。纯缓存与解码好的样本都不必陪到那时候：后台占用越低，越不容易被系统结束（结束后用户再点输入框看到的是系统键盘）。
+    releaseRebuildableCaches(reason: "dismiss")
+    keySounds.release()
     flushStatistics()
     // A reused controller must not count presses on its next appearance until that appearance's isEnabled() answer arrives.
     countsKeyPresses = false
+    mainThreadProbe.stop()
   }
 
   /// 第二道保险：`viewWillDisappear` 里没能放掉的会话在这里再放一次（已经放掉时什么也不做）。在这之前又来了 `viewWillAppear` 的话键盘还在屏幕上，会话不能动。
@@ -10790,6 +10891,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
 
   /// 收起键：面板、候选网格或回复面板盖住按键时先回到键盘，与 Android 一致；没有盖住时收起整个键盘。
   private func dismissOrReturnToKeys() {
+    // 「点收起没反应」有两种可能：触摸根本没到这里，或者到了但主线程随后被占住。先记一行，设备日志里一行就能分清。
+    DiagnosticLog.shared.write("dismiss_requested panel=\(keyAreaPanel != nil ? 1 : 0) reply=\(replyKeyboardShown ? 1 : 0) composing=\(hasComposition ? 1 : 0)")
     if keyAreaPanel != nil || phrasesRequest != nil {
       closeKeyboardPicker()
       return
@@ -10954,6 +11057,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
 
   @objc private func noteSessionInBackground() {
     DiagnosticLog.shared.write("host_background session_held=\(session.holdsSession ? 1 : 0) presented=\(isPresented ? 1 : 0)")
+    // 宿主进了后台，扩展随时被挂起、也随时被系统结束，常驻内存这时越少越好。纯缓存放掉，候选画布的皮肤图留着——键盘还显示着，回来未必再走一次 `viewWillAppear`。
+    releaseRebuildableCaches(reason: "background")
   }
 
   private func selectTraditionalOutput(_ traditional: Bool) {
@@ -11466,6 +11571,13 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
 
   @objc private func prepareKeyFeedback() {
     lastKeyTouchTime = ProcessInfo.processInfo.systemUptime
+    mainThreadProbe.mark("key")
+    if !firstKeyReported, let firstFrameAt {
+      firstKeyReported = true
+      let waited = Self.elapsedMilliseconds(since: firstFrameAt)
+      // 第一帧到第一次按键被接住的时间。触摸事件要等主线程腾出手才送到这里，所以这个数就是用户按下去到键盘有反应的等待。超过三秒说明用户只是没马上打字，不是主线程没腾出手，那就不记，免得把「晚点才打」读成启动卡顿；它跟着进程走，控制器被复用时不再记第二次。
+      if waited <= 3_000 { DiagnosticLog.shared.write("first_key ms=\(waited)") }
+    }
     if hapticsEnabled { keyFeedback.prepare() }
   }
 
