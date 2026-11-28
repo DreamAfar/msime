@@ -35,8 +35,6 @@ final class DiagnosticLog: @unchecked Sendable {
   private static let mirrorLogger = Logger(subsystem: "app.msime.ios.keyboard", category: "diagnostic")
   /// 系统日志逐行同步写要几十微秒到几毫秒，而这份日志正是用来量启动耗时的。镜像排到后台队列，写文件照旧在调用线程完成。
   private static let mirrorQueue = DispatchQueue(label: "app.msime.ios.diagnostic-mirror", qos: .utility)
-  /// 系统日志逐行同步写要几十微秒到几毫秒，而这份日志正是用来量启动耗时的。镜像排到后台队列，写文件照旧在调用线程完成。
-  private static let mirrorQueue = DispatchQueue(label: "app.msime.ios.diagnostic-mirror", qos: .utility)
 
   private static func rejectsSymlinkAncestors(_ path: URL) -> Bool {
     SafePath.hasRefusedSymbolicLink(path)
