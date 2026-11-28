@@ -247,9 +247,17 @@ final class KeyboardMemoryTests: XCTestCase {
       XCTAssertTrue(timing[key] == "-" || timing[key].flatMap { UInt64($0) } != nil,
                     "keyboard_timing has \(key)=\(timing[key] ?? "nil")")
     }
-    // 首帧前那一段的分段：出现准备、窗口换装、布局都是毫秒数（没走到的记 0），整棵键盘的排布次数一定有。
-    for key in ["will_appear_ms", "window_skin_ms", "layout_ms", "layouts"] {
+    // 首帧前那一段的分段：出现准备、窗口换装、布局都是毫秒数（没走到的记 0），整棵键盘的排布次数和累计排布时间一定有。
+    for key in ["will_appear_ms", "window_skin_ms", "layout_ms", "layout_total_ms", "layouts"] {
       XCTAssertNotNil(timing[key].flatMap { UInt64($0) }, "keyboard_timing has no \(key): \(timing)")
+    }
+    // `will_spans` 是 `theme:12,prefs:40,…` 这样的一行，每段都带毫秒数。
+    let spans = (timing["will_spans"] ?? "").split(separator: ",")
+    XCTAssertFalse(spans.isEmpty, "keyboard_timing has no will_spans: \(timing)")
+    for span in spans {
+      let parts = span.split(separator: ":")
+      XCTAssertEqual(parts.count, 2, "will_spans entry \(span)")
+      XCTAssertNotNil(parts.last.flatMap { UInt64($0) }, "will_spans entry \(span)")
     }
   }
 

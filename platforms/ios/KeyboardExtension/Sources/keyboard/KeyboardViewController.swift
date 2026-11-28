@@ -47,6 +47,10 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private var firstLayoutMilliseconds = 0
   /// 这次出现把整棵键盘排了几遍（`updateKeyboardLayout`）。底行地球键读到不准的值会让它在首帧前多排一遍，设备上对照 `first_frame_ms` 就知道多排那遍值多少。
   private var keyboardLayoutPasses = 0
+  /// 这些遍加起来的毫秒数。次数少不等于便宜：每遍都重设几百条约束、换一遍键面配置，重新解布局的时间落在 `viewDidLayoutSubviews` 之外，`layout_ms` 量不到。
+  private var keyboardLayoutMilliseconds = 0
+  /// `viewWillAppear` 里逐段的耗时（`theme:12 prefs:40 layout:18 session:25 …`）。`will_appear_ms` 只说这一段一共多久，拆开才知道该先减哪一块。
+  private var willAppearSpans: [(name: String, milliseconds: Int)] = []
   /// 键盘是否已经画出第一帧（`viewDidAppear` 走到过半）。第一帧之前系统就可能连着发内存警告，那时全量释放只会把正要用的缓存清掉，见 `didReceiveMemoryWarning`。
   private var hasDrawnFirstFrame = false
   /// 第一帧之前被合并掉的内存警告次数，写进下一条 `memory_warning`，设备上据此判断这次唤起挨了多少次压力。
@@ -1154,7 +1158,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     DiagnosticLog.shared.write("keyboard_shown \(DiagnosticLog.MemorySample.current().fields) \(memoryParts)")
     if drawsFirstFrame {
       // 启动各段分开记：`prepare_ms` 是桥里量的 `msimeClientPrepareHost`（校验资源、搬辅助码表、写运行时选项），`built_ms` 是建完整套键盘界面，`first_frame_ms` 从 `viewDidLoad` 起算到这一行，`resume_ms` 是 `viewWillAppear` 里重建词库会话。只有分开才知道该先减哪一段，也才能核对首帧之前的内存警告有没有被合并。这次出现的后续再出现只写 `keyboard_shown`，不重复记启动耗时。
-      DiagnosticLog.shared.write("keyboard_timing prepare_ms=\(session.hostPrepareMilliseconds.map { String($0) } ?? "-") built_ms=\(builtMilliseconds) first_frame_ms=\(Self.elapsedMilliseconds(since: loadStartedAt)) will_appear_ms=\(willAppearMilliseconds) window_skin_ms=\(windowSkinMilliseconds) layout_ms=\(firstLayoutMilliseconds) layouts=\(keyboardLayoutPasses) resume_ms=\(dictionaryResumeMilliseconds.map { String($0) } ?? "-") deferred_warnings=\(deferredMemoryWarnings)")
+      DiagnosticLog.shared.write("keyboard_timing prepare_ms=\(session.hostPrepareMilliseconds.map { String($0) } ?? "-") built_ms=\(builtMilliseconds) first_frame_ms=\(Self.elapsedMilliseconds(since: loadStartedAt)) will_appear_ms=\(willAppearMilliseconds) window_skin_ms=\(windowSkinMilliseconds) layout_ms=\(firstLayoutMilliseconds) layout_total_ms=\(keyboardLayoutMilliseconds) layouts=\(keyboardLayoutPasses) will_spans=\(Self.spanFields(willAppearSpans)) resume_ms=\(dictionaryResumeMilliseconds.map { String($0) } ?? "-") deferred_warnings=\(deferredMemoryWarnings)")
     }
     // UIKit may publish the document identifier and keyboard type one run-loop turn after the
     // extension appears. Refresh the first frame once those host traits are available.
@@ -1239,6 +1243,15 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
 
   override func viewWillAppear(_ animated: Bool) {
     super.viewWillAppear(animated)
+    // 首帧之前这几段逐段计时：`will_appear_ms` 只说这一段一共多久，设备上三百多毫秒里有近一半落在这里，
+    // 不拆开就只能靠猜哪块该减。只量这一次出现的第一帧，之后每次出现不再记。
+    var spanMark = ProcessInfo.processInfo.systemUptime
+    func noteSpan(_ name: String) {
+      guard !hasDrawnFirstFrame else { return }
+      let now = ProcessInfo.processInfo.systemUptime
+      willAppearSpans.append((name: name, milliseconds: Int(((now - spanMark) * 1000).rounded())))
+      spanMark = now
+    }
     clipboardHistoryPreferencesReady = false
     candidateCanvasActive = true
     isPresented = true
@@ -1247,6 +1260,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     // 进程可能跨过换季或应用主题的改动；在下面任何地方解析皮肤之前先刷新。变了就重新解析主题，让末尾的 `applyKeyboardSkin` 给按键换上新的颜色实例：按键进窗口时已按旧季节解析过同一批动态色，同一个实例再设一次 UIButton 不会重新解析。
     let seasonChanged = KeyboardTheme.refreshSeason()
     if seasonChanged { KeyboardTheme.reload(session.sharedPreferences, dark: drawsDark) }
+    noteSpan("theme")
     incognito = KeyboardPrivacyPreference.incognito
     oneHandedMode = KeyboardLayoutPreference.oneHanded
     if adjustOverlay == nil {
@@ -1257,6 +1271,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     readToolbarPreferences()
     readGesturePreferences()
     applyOneHanded()
+    noteSpan("prefs")
     // 地球键决定底行要多一格：先问一次，让下面这次布局直接按对的值排，`viewDidLayoutSubviews` 的检查就不必为它再排一遍。
     reconciledGlobeKeyInWindow = false
     resolveInputModeSwitchKey(trustingFalse: false)
@@ -1265,6 +1280,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     keyboardInputContainerView?.refreshPreferredHeight()
     // 隐私模式和输入框都可能在两次出现之间变了，日志开不开要重新判断。
     configureDiagnosticLog()
+    noteSpan("layout")
     DiagnosticLog.shared.write("focus_in \(DiagnosticLog.MemorySample.current().fields)")
     KeyboardUsageReporting.presented(fullAccess: hasFullAccess)
     // 收起时销毁的会话在这里同步重建，挡在这次出现的第一帧前面；记下耗时，在设备上看它有多重。
@@ -1287,6 +1303,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       DiagnosticLog.shared.write("dictionary_resume_failed")
       showDiagnostic(error.localizedDescription)
     }
+    noteSpan("session")
     // 新的编辑会话不欠任何回调，上一次出现时留下的回声窗口不能延续到这里。
     ownEditEcho.reset()
     inlineMarkedText = ""
@@ -1301,6 +1318,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     bilingualGlideEnabled = KeyboardLayoutPreference.bilingualGlide
     // 完全访问和按键音开关都可能在两次出现之间变了；包先按会话手上的文档开始加载，重读之后选择变了再换。
     synchronizeKeySoundPack()
+    noteSpan("sync")
     // The Tauri settings app writes the shared PreferencesStore rather than the
     // legacy App Group UserDefaults used by the old SwiftUI settings page.
     // Reload it off-thread so a fuzzy-pinyin change is visible the next time
@@ -1352,11 +1370,14 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     onlineCandidates.cancel()
     renderCandidateStrip()
     scheduleCandidateGlosses()
+    noteSpan("candidates")
     // 换了季节必须整棵重新换装（见上面 `refreshSeason` 的注释）；否则只在皮肤变了时才在这里重走按键树，trait 和窗口外建过的按键留给 `viewIsAppearing`。
     mainThreadProbe.mark("appearance")
     applyKeyboardSkin(onlyIfChanged: !seasonChanged)
+    noteSpan("skin")
     synchronizeReplyKeyboard()
     startCountingKeyPresses()
+    noteSpan("reply")
     mainThreadProbe.mark("idle")
     if !hasDrawnFirstFrame { willAppearMilliseconds = Self.elapsedMilliseconds(since: loadStartedAt) }
   }
@@ -1376,6 +1397,12 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   /// 诊断日志里的耗时：从 `start`（`systemUptime`）到现在的整毫秒数。
   private static func elapsedMilliseconds(since start: TimeInterval) -> Int {
     Int(((ProcessInfo.processInfo.systemUptime - start) * 1000).rounded())
+  }
+
+  /// `willAppearSpans` 写成 `theme:12,prefs:40,…`，给 `keyboard_timing` 用。用逗号隔开：日志的字段之间是空格，
+  /// 用空格分出的后半截会被读日志的人和脚本当成另外几个字段。
+  private static func spanFields(_ spans: [(name: String, milliseconds: Int)]) -> String {
+    spans.map { "\($0.name):\($0.milliseconds)" }.joined(separator: ",")
   }
 
   /// iOS ends a keyboard extension that keeps using too much memory, so a warning is worth a line when a report says the keyboard vanished.
@@ -7862,6 +7889,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
 
   private func updateKeyboardLayout() {
     keyboardLayoutPasses += 1
+    let passStarted = ProcessInfo.processInfo.systemUptime
+    defer { keyboardLayoutMilliseconds += Self.elapsedMilliseconds(since: passStarted) }
     ensureAlternateLetterRows()
     applyLetterGridWidths()
     // 分离与否先定下来：iPad 画横屏分离式键盘时单手让位，单手又决定下面各处按哪种键面画（`keyFaceFormFactor`）。是否分离只看方案、层和设备形态，不看键面。
@@ -8201,6 +8230,10 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     updateSpaceKeyTitle()
     updateToolbarSymbolsEntry()
     updatePreferredKeyboardHeight()
+    // 这一遍用的输入记下来。直接调用本函数的地方（建界面、底行重排、视图的第一次布局）以前不记，
+    // 紧接着的 `updateKeyboardLayoutIfNeeded` 会拿它和 nil 或旧值比，判定「变了」再整棵排一遍。
+    // 设备上首帧前排了 10 遍，其中几遍就是这么来的。
+    appliedLayoutInputs = layoutInputs
   }
 
   /// 双字母键面保持单行但把两个字母稍微分开；微软双拼的 `L;` 使用较小字距，键面字符串和读屏不变。

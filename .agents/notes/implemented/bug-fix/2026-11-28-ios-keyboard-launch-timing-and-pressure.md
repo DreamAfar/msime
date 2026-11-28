@@ -13,6 +13,10 @@ Status: implemented
 
 加上第一版计时之后，真机复测（同一进程 8 次唤起）把缺口量出来了：进程内第一次唤起 `first_frame_ms=1813`，其中 `built_ms=235`，剩下 1578 ms 全在 `keyboard_built` 之后；之后 7 次稳定在 482–526 ms，`prepare_ms` 67–79、`built_ms` 137–151，也就是说 **343–375 ms 落在 `keyboard_built` 到首帧之间**，而这一段当时一行读数都没有。同一份日志里还能看到底行的地球键在 `viewDidLoad` 与连上宿主之间读到了不同的值，`viewDidLayoutSubviews` 为此把整棵键盘又排了一遍——`needsInputModeSwitchKey` 在扩展连上宿主之前只是默认值，布局却把它当成了结论。
 
+第二版把地球键按进程记住、并把这一段的四段打点补上后，同一台设备上 `first_frame_ms=353`：`prepare_ms=69`、`built_ms=143`、`will_appear_ms=296`、`window_skin_ms=9`、`layout_ms=0`、`resume_ms=25`。也就是说 `viewIsAppearing` 到首帧只剩 57 ms，**153 ms 落在 `viewWillAppear` 里**（减去重建会话的 25 ms 仍有约 128 ms 没有归属），同时 `layouts=10`——整棵键盘在首帧前被排了十遍。同一个进程里另外七次唤起仍然是 350 ms 上下，`layouts` 也仍是两位数，说明这不是地球键那一条路径，而是每次出现固定的重排。用户在同一版上仍然看到「先出现白色键盘底框、再出现按键」，截图里只有系统在扩展外面画的那条底栏（地球键与麦克风）和键盘底板，扩展自己的视图还什么都没画：这段空白就是首帧之前的等待，`first_frame_ms` 有 350 ms 时肉眼一定能看到。
+
+`layout_ms=0` 说明单遍布局本身不贵，但那只量了 `viewDidLayoutSubviews` 回调自己的时间；每遍重设几百条约束后重新解算整棵键盘发生在回调之外，十遍加起来是多少没有任何读数。
+
 ## Decision
 
 先让启动时间可分段度量，同时砍掉第一帧之前那批只会让首帧重算的释放。
@@ -30,6 +34,9 @@ Status: implemented
 - **收起与宿主进后台时放掉纯缓存。** `releaseRebuildableCaches` 清手写笔迹、主题解析结果、释义与译文；收起时另外放掉按键音播放器（下次出现按偏好在后台重载，不挡首帧）。候选画布的皮肤图两处都留着：收起再出现沿用已解码的那一份是有意的（`CandidateCanvasTests` 守着），宿主进后台时键盘还显示着、回来未必再走一次 `viewWillAppear`。两处都记一行 `caches_released`，带释放前后的内存读数。
 - **首帧前的空白段也分段。** `keyboard_timing` 增加 `will_appear_ms`（`viewWillAppear` 走完时从 `viewDidLoad` 起算）、`window_skin_ms`（`viewIsAppearing` 补窗口换装）、`layout_ms`（首帧前最后一次 `viewDidLayoutSubviews`）与 `layouts=`（这次出现调了几遍 `updateKeyboardLayout`）。四段加起来对上 `first_frame_ms` 与 `built_ms` 之差，就能判断三百多毫秒里是偏好准备、整树换装还是布局占着。
 - **地球键按进程记住，布局不再问系统。** 新增 `layoutRequiresGlobeKey`：本次出现解析过就用本次的值，其次用同一扩展进程里上一次解析的值，都没有才读 `needsInputModeSwitchKey`。布局里所有读 `needsInputModeSwitchKey` 的地方（`layoutInputs`、底行宽度表、九宫格借位、日文模式列、`viewDidLayoutSubviews` 的核对）都改成读它。每次出现只解析两次：`viewWillAppear` 里一次（`trustingFalse: false`，此时系统只会说「不要」，那个 false 是默认值，不覆盖上一次记下的「要」），进窗口后的 `viewDidLayoutSubviews` 核一次真值，首帧后那一轮异步刷新里再兜底一次。进程级缓存只在 `.appex` 里生效，测试宿主 `.xctest` 不看它，用例之间不会互相带上一个值。
+- **`viewWillAppear` 逐段计时。** `will_appear_ms` 只说这一段一共 153 ms，拆成 `will_spans=theme:…,prefs:…,layout:…,session:…,sync:…,candidates:…,skin:…,reply:…`，按代码里现成的分段点取时间差，用逗号隔开（日志字段之间是空格）。只量这一次出现的第一帧。
+- **`layout_total_ms`：十遍布局到底值多少。** `layout_ms` 量的是 `viewDidLayoutSubviews` 回调自己，约束重设后重新解算整棵键盘发生在回调之外；在 `updateKeyboardLayout` 开头取时刻、用 `defer` 累加，行尾与 `layouts=` 并排，一眼能看出「十遍很贵」还是「十遍是噪音」。
+- **`updateKeyboardLayout` 末尾记下这一遍用的输入。** `appliedLayoutInputs` 原先只在 `updateKeyboardLayoutIfNeeded` 里、调用之前写；直接调用 `updateKeyboardLayout` 的三处（建界面、`viewDidLayoutSubviews` 里的底行重排、分离切换）不写，紧接着的 `updateKeyboardLayoutIfNeeded` 拿它和 nil 或旧值比，判定「变了」再整棵排一遍。现在每遍结束时按当时的值写一次，`viewDidLayoutSubviews` 里 `numberRowFits` 的那次核对比的也是最新一遍的结果。
 
 ## Alternatives considered
 
@@ -46,14 +53,17 @@ Status: implemented
 - **把 `updateKeyboardLayout` 拆出「只重排底行」的轻量版本** — 地球键只影响底行那几个键的显隐与宽度，理论上可以只重排 `actionRow`。但 `arrangeActionRow` 的入参是从 `updateKeyboardLayout` 的十几个局部变量（键面、层、数字页、样式与分离状态）算出来的，抽取面几乎覆盖整个函数，回归风险高于收益；先按进程记住地球键把这一遍整树排掉，改的只是读值处。
 - **首帧前不排布局，等确认连上宿主再排** — 没有可靠的「连接已建立」回调，`viewDidAppear` 是唯一确定点，等到那里等于首帧前没有键盘；键盘被挡住时还可能永远等不到。
 - **每轮 `viewDidLayoutSubviews` 都读真值核对地球键** — 最直白，但 `needsInputModeSwitchKey` 每次读都要问输入系统，设备日志里一轮出现读二十余次就是布局反复读它造成的；改成每次出现只核一次，值错了也只在首帧前多排一遍。
+- **先猜「十遍布局」是空白帧的原因，直接去掉几条重排路径** — `layout_ms=0` 说明最后一遍本身不贵，十遍加起来是否可观没有任何读数；在没有 `layout_total_ms` 之前删路径，等于把回归风险押在猜测上。
+- **把空白帧当成本地渲染问题（以为按键没画出来）去查绘制** — 截图里能看到的那条底栏（地球键、麦克风）是 iOS 在所有第三方键盘下方画的系统区域，扩展只能画在它上面；扩展自己的视图那时还没出第一帧。要缩短的是首帧时间，不是绘制路径。
 
 ## Consequences
 
-- **收益**：启动时间被拆成准备运行时、建界面、第一帧、重建会话四段，设备上可以直接看出该减哪一块；第一帧之前的 149 次全量释放变成一行日志，省掉重复的主题解析、候选外观重算和跨输入线程清缓存；按键音不再在启动阶段被反复释放重载（同一份日志里 47 次唤起重载了 39 次）。首帧之后再也不用为一份没变的文档跑那一串同步与外观重算，`main_stall`/`first_frame_idle`/`first_key` 能把「显示出来但点不动」定位到具体阶段；收起与后台不再带着释义译文和已解码的按键音常驻，后台被 jetsam 结束的概率随之下降。首帧前那 343–375 ms 现在拆成出现准备、窗口换装、布局三段，`layouts=` 能直接看出整棵键盘排了几遍；同一个进程里第二次唤起不必再为地球键多排一遍，底行首帧前就按对的值画出来，布局里也不再反复向输入系统查询这个值。
+- **收益**：启动时间被拆成准备运行时、建界面、第一帧、重建会话四段，设备上可以直接看出该减哪一块；第一帧之前的 149 次全量释放变成一行日志，省掉重复的主题解析、候选外观重算和跨输入线程清缓存；按键音不再在启动阶段被反复释放重载（同一份日志里 47 次唤起重载了 39 次）。首帧之后再也不用为一份没变的文档跑那一串同步与外观重算，`main_stall`/`first_frame_idle`/`first_key` 能把「显示出来但点不动」定位到具体阶段；收起与后台不再带着释义译文和已解码的按键音常驻，后台被 jetsam 结束的概率随之下降。首帧前那 343–375 ms 现在拆成出现准备、窗口换装、布局三段，`layouts=` 能直接看出整棵键盘排了几遍；同一个进程里第二次唤起不必再为地球键多排一遍，底行首帧前就按对的值画出来，布局里也不再反复向输入系统查询这个值。第三版把 `viewWillAppear` 里的 153 ms 再拆成八段、把十遍布局的累计耗时单列，并让每一遍布局结束时记下自己用的输入：直接调用之后紧跟一次 `updateKeyboardLayoutIfNeeded` 的那类重复重排不再发生。
 - **代价**：诊断日志开着时多一个每 40 ms 敲主队列的后台定时器（只比时间戳，不采样、不建视图）；收起后第一次打字前按键音要重新加载，最坏头几个键退回系统按键声；后台放掉释义与译文后，回前台第一次出候选要重新取一遍，联网翻译会多一次请求。
 - **重访信号（首帧后）**：真机日志里若 `main_stall` 集中在 `preferences` 阶段，说明文档确实每次都在变，下一步要查是谁在写；若集中在 `appearance`，说明整树换装仍需削减。`preferences_unchanged` 与 `preferences_applied` 的比例能直接说明去重省掉了多少轮。`caches_released` 前后内存差很小，说明常驻大头不在这些纯缓存上，得转向引擎会话与视图本身。
 - **重访信号（启动）**：真机日志里 `keyboard_timing` 的 `prepare_ms` 若明显大于 `built_ms` 与 `first_frame_ms` 之和，下一步该做的是把准备运行时挪出首帧（即上面被否决的那条，需要先拆偏好读取）；若 `deferred_warnings` 很大而 `first_frame_ms` 仍不动，说明瓶颈不在内存压力，回到建界面与布局。
 - **重访信号（地球键）**：稳态唤起的 `layouts=` 应为 1。若常见 2 而 `window_skin_ms` 很小，说明多排的那遍来自首帧前的地球键核对（用户常在增删输入法），这时才值得去做「只重排底行」；若同时 `window_skin_ms` 接近那三百毫秒，问题在 `viewIsAppearing` 的整树换装，先查 `keySkinNeedsWindowPass` 为什么每次出现都为真。
+- **重访信号（空白帧）**：`first_frame_ms` 超过约 200 ms 时，第三方键盘下方那条系统底栏会先于扩展的画面上屏，用户看到的就是「先白底框、再出按键」。这时按 `will_spans` 决定下一步：`prefs`、`sync` 占大头就把这几项里的 App Group 读取与资源包清点挪到后台；`layout` 或 `layout_total_ms` 占大头才去合并那十遍重排；`session` 占大头（`resume_ms` 常在 25–50 ms）则要重新考虑会话的建立时机，也就是上面被否决的那条 `msimeClientLoadPreferences`。
 
 ## Verification
 
@@ -62,5 +72,5 @@ Status: implemented
 - `KeyboardMemoryTests` 原有的三条内存警告用例改为在 `viewDidAppear` 之后发警告，契约不变（一次 `engine_cache=reset`、一次 `engine_cache=deferred`，上屏后一行 `engine_cache_reset`）。
 - 新增 `PreferencesReloadOutcomeTests`：同一份文档连着读两次，第二次必须是 `unchanged(revision)`；写一个字段之后必须 `applied` 且 revision 更大；旧的布尔回调在 `unchanged` 时仍是 `true`，剪贴板历史的启用条件不被去重关掉。
 - 新增 `KeyboardStallDetectorTests`：短于阈值不报、超时只报一次下界、恢复时明显更长才补准确值、后台没赶上时由主线程记、相差不到 100 ms 不重复写、上一拍还挂着时不再投。
-- `testKeyboardLaunchFootprintIsLoggedPerStage` 追加 `will_appear_ms`、`window_skin_ms`、`layout_ms`、`layouts` 四个字段的数字校验：前三个没走到的段记 0，不写 `-`，这样「没发生」和「没记」在设备日志里分得开。
+- `testKeyboardLaunchFootprintIsLoggedPerStage` 追加 `will_appear_ms`、`window_skin_ms`、`layout_ms`、`layouts` 四个字段的数字校验：前三个没走到的段记 0，不写 `-`，这样「没发生」和「没记」在设备日志里分得开。第三版再加 `layout_total_ms` 的数字校验，并把 `will_spans` 按逗号拆开、逐段校验 `名字:毫秒数`，保证这一行在字段之间只用空格分隔的日志里不会被拆成别的字段。
 - 未验证：没有真机数据。模拟器不给 `avail`、也不设扩展上限，`deferred_warnings` 与两秒窗口的实际效果只能在设备上确认；首帧之前不清缓存对 jetsam 的影响同样需要真机复测。`main_stall`、`first_frame_idle`、`first_key`、`caches_released` 这几行是这次加在设备上的读数，本轮既没有真机日志，也没有模拟器上的卡顿复现，只能确认它们不改变现有用例的断言。
