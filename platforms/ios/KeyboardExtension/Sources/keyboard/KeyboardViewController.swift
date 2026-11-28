@@ -39,6 +39,14 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private var builtMilliseconds = 0
   /// `viewWillAppear` 里重建词库会话的毫秒数；这次出现没有重建（会话还在）时为 nil。
   private var dictionaryResumeMilliseconds: Int?
+  /// `viewWillAppear` 走完时从 `viewDidLoad` 起算的毫秒数。`built_ms` 只到 `viewDidLoad` 末尾，到首帧之间还有出现的整套准备，这一段以前没有数：设备上首帧比 `built_ms` 多出三百多毫秒，不知道落在哪里。
+  private var willAppearMilliseconds = 0
+  /// `viewIsAppearing` 里补窗口换装的毫秒数；这次出现没走换装时为 0。
+  private var windowSkinMilliseconds = 0
+  /// 首帧之前最后一次 `viewDidLayoutSubviews` 的毫秒数。
+  private var firstLayoutMilliseconds = 0
+  /// 这次出现把整棵键盘排了几遍（`updateKeyboardLayout`）。底行地球键读到不准的值会让它在首帧前多排一遍，设备上对照 `first_frame_ms` 就知道多排那遍值多少。
+  private var keyboardLayoutPasses = 0
   /// 键盘是否已经画出第一帧（`viewDidAppear` 走到过半）。第一帧之前系统就可能连着发内存警告，那时全量释放只会把正要用的缓存清掉，见 `didReceiveMemoryWarning`。
   private var hasDrawnFirstFrame = false
   /// 第一帧之前被合并掉的内存警告次数，写进下一条 `memory_warning`，设备上据此判断这次唤起挨了多少次压力。
@@ -758,6 +766,17 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private var currentNineKeySingleCharacter = false
   private var currentNineKeyStrokes = ""
   private var appliedLayoutInputs: KeyboardLayoutInputs?
+  /// 同一个扩展进程里上一次问到的「底行要不要画地球键」。系统每次唤起键盘可能新建控制器，所以放在进程级：下一次唤起
+  /// 在 `viewDidLoad` 就能按上次的值排底行，不必等连上宿主之后再排一遍。
+  ///
+  /// 只在 `.appex` 里生效。测试宿主是 `.xctest`，用例之间不该互相带上一个值。
+  private static var lastResolvedInputModeSwitchKey: Bool?
+  private static let cachesInputModeSwitchKeyAcrossControllers = Bundle.main.bundlePath.hasSuffix(".appex")
+  /// 这次出现问到的值，`viewWillAppear` 与首帧后各解析一次。
+  private var cachedInputModeSwitchKey = false
+  private var hasResolvedInputModeSwitchKey = false
+  /// 这次出现进窗口后核对过地球键没有：连上宿主之前读到的「不要」可能只是默认值，进窗口后要核一次真值。
+  private var reconciledGlobeKeyInWindow = false
   private var appliedLetterCaseInputs: LetterCaseInputs?
   /// 上一次排字母键面时按哪个方向算的双拼提示边距：手机横竖屏的键高是 44pt 和 34pt，转屏后要重排一次。
   private var appliedHintBandsLandscape: Bool?
@@ -1135,7 +1154,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     DiagnosticLog.shared.write("keyboard_shown \(DiagnosticLog.MemorySample.current().fields) \(memoryParts)")
     if drawsFirstFrame {
       // 启动各段分开记：`prepare_ms` 是桥里量的 `msimeClientPrepareHost`（校验资源、搬辅助码表、写运行时选项），`built_ms` 是建完整套键盘界面，`first_frame_ms` 从 `viewDidLoad` 起算到这一行，`resume_ms` 是 `viewWillAppear` 里重建词库会话。只有分开才知道该先减哪一段，也才能核对首帧之前的内存警告有没有被合并。这次出现的后续再出现只写 `keyboard_shown`，不重复记启动耗时。
-      DiagnosticLog.shared.write("keyboard_timing prepare_ms=\(session.hostPrepareMilliseconds.map { String($0) } ?? "-") built_ms=\(builtMilliseconds) first_frame_ms=\(Self.elapsedMilliseconds(since: loadStartedAt)) resume_ms=\(dictionaryResumeMilliseconds.map { String($0) } ?? "-") deferred_warnings=\(deferredMemoryWarnings)")
+      DiagnosticLog.shared.write("keyboard_timing prepare_ms=\(session.hostPrepareMilliseconds.map { String($0) } ?? "-") built_ms=\(builtMilliseconds) first_frame_ms=\(Self.elapsedMilliseconds(since: loadStartedAt)) will_appear_ms=\(willAppearMilliseconds) window_skin_ms=\(windowSkinMilliseconds) layout_ms=\(firstLayoutMilliseconds) layouts=\(keyboardLayoutPasses) resume_ms=\(dictionaryResumeMilliseconds.map { String($0) } ?? "-") deferred_warnings=\(deferredMemoryWarnings)")
     }
     // UIKit may publish the document identifier and keyboard type one run-loop turn after the
     // extension appears. Refresh the first frame once those host traits are available.
@@ -1144,6 +1163,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       // Do not let a delayed proxy callback cancel text typed between appearance and this turn.
       // The next keyboard activation retries synchronization if the host withheld its identifier.
       guard !self.hasComposition else { return }
+      // 这时已经连上宿主，地球键的值可信了。和这一轮布局用的不同才重排（用户刚增删过输入法）。
+      if self.resolveInputModeSwitchKey(trustingFalse: true) { self.updateKeyboardLayout() }
       self.synchronizeInputContext()
       self.synchronizeInputSchemePreference()
       self.updateLanguageModeButton()
@@ -1236,6 +1257,9 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     readToolbarPreferences()
     readGesturePreferences()
     applyOneHanded()
+    // 地球键决定底行要多一格：先问一次，让下面这次布局直接按对的值排，`viewDidLayoutSubviews` 的检查就不必为它再排一遍。
+    reconciledGlobeKeyInWindow = false
+    resolveInputModeSwitchKey(trustingFalse: false)
     updateKeyboardLayoutIfNeeded()
     // 宿主退到后台后可能保留旧的 `UIInputView` 外框。即使目标高度没有变化，也要让 UIKit 在回前台时重新协商一次。
     keyboardInputContainerView?.refreshPreferredHeight()
@@ -1334,6 +1358,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     synchronizeReplyKeyboard()
     startCountingKeyPresses()
     mainThreadProbe.mark("idle")
+    if !hasDrawnFirstFrame { willAppearMilliseconds = Self.elapsedMilliseconds(since: loadStartedAt) }
   }
 
   /// 到这里视图已经进了窗口、trait 也定了，而第一帧还没画。`viewWillAppear` 时视图通常还不在窗口里：在那里按 trait 和「有按键在窗口外装饰过」判断，`viewDidLoad` 留下的标记会让第一次出现再整棵走一遍，在窗口外走完又把标记留给下一次，每次出现都是完整换装。所以这两项在这里判断，只有确实要补的时候才换装。
@@ -1341,7 +1366,9 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     super.viewIsAppearing(animated)
     if keySkinNeedsWindowPass || appliedKeySkin != KeyboardTheme.current || appliedKeySkinTraits != traitCollection {
       mainThreadProbe.mark("window_skin")
+      let started = ProcessInfo.processInfo.systemUptime
       applyKeyboardSkin()
+      if !hasDrawnFirstFrame { windowSkinMilliseconds = Self.elapsedMilliseconds(since: started) }
       mainThreadProbe.mark("idle")
     }
   }
@@ -7662,11 +7689,39 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     let inReadingRow: Bool
   }
 
+  /// 排底行时用的地球键判断：这次出现解析过就用这次的值，其次用同一进程里上次解析的，都没有才当场问系统。
+  ///
+  /// `UIInputViewController.needsInputModeSwitchKey` 每次读都要问输入系统，扩展连上宿主之前给的值可能是错的：
+  /// `viewWillAppear` 读到 false、连上之后变 true，`viewDidLayoutSubviews` 里那次检查就把整棵键盘再排一遍。
+  /// 布局只认这里，同一个进程里第二次唤起就不会为它多排一遍。
+  private var layoutRequiresGlobeKey: Bool {
+    if hasResolvedInputModeSwitchKey { return cachedInputModeSwitchKey }
+    if Self.cachesInputModeSwitchKeyAcrossControllers, let last = Self.lastResolvedInputModeSwitchKey {
+      return last
+    }
+    return needsInputModeSwitchKey
+  }
+
+  /// 问一次系统要不要地球键并记下来；返回值和这一轮布局用的不一样时，调用方要把底行重排。
+  ///
+  /// `trustingFalse` 只在首帧之后传 true。扩展连上宿主之前系统只会说「不要」，那时读到 false 是默认值而不是
+  /// 结论：如果拿它覆盖上一次出现记下的「要」，底行首帧前按「不要」排一遍、首帧后再按「要」排一遍，正是要省掉的那次。
+  @discardableResult
+  private func resolveInputModeSwitchKey(trustingFalse: Bool) -> Bool {
+    let required = needsInputModeSwitchKey
+    if !required && !trustingFalse && layoutRequiresGlobeKey { return false }
+    let changed = layoutRequiresGlobeKey != required
+    cachedInputModeSwitchKey = required
+    hasResolvedInputModeSwitchKey = true
+    if Self.cachesInputModeSwitchKeyAcrossControllers { Self.lastResolvedInputModeSwitchKey = required }
+    return changed
+  }
+
   private var layoutInputs: KeyboardLayoutInputs {
     KeyboardLayoutInputs(
       chinese: isChineseMode, scheme: inputScheme, letterGrid: typesLetterGrid ? letterGrid : nil, localMode: currentLocalMode,
       symbols: showsSymbols, moreSymbols: showsMoreSymbols,
-      toolbarEmojiAvailable: toolbarEmojiAvailable, globe: needsInputModeSwitchKey,
+      toolbarEmojiAvailable: toolbarEmojiAvailable, globe: layoutRequiresGlobeKey,
       geometry: KeyboardLayoutPreference.geometry,
       formFactor: formFactor, keyFace: keyFaceFormFactor, fullKeys: KeyboardLayoutPreference.tabletFullKeys,
       split: wantsSplitKeyboard, keyStyle: activeKeyLayoutStyle, numberRowFits: numberRowFits)
@@ -7806,6 +7861,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   }
 
   private func updateKeyboardLayout() {
+    keyboardLayoutPasses += 1
     ensureAlternateLetterRows()
     applyLetterGridWidths()
     // 分离与否先定下来：iPad 画横屏分离式键盘时单手让位，单手又决定下面各处按哪种键面画（`keyFaceFormFactor`）。是否分离只看方案、层和设备形态，不看键面。
@@ -7823,8 +7879,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     japaneseHeight?.isActive = kana
     japaneseKeys?.applyLayout()
     actionRow?.isHidden = kana
-    japaneseGlobeButton?.isHidden = !needsInputModeSwitchKey
-    japaneseKeys?.setModeColumnFull(needsInputModeSwitchKey)
+    japaneseGlobeButton?.isHidden = !layoutRequiresGlobeKey
+    japaneseKeys?.setModeColumnFull(layoutRequiresGlobeKey)
     let nineKey = isChineseMode && inputScheme.isMandarinNineKey && !isInLocalMode
     let writes = isChineseMode && inputScheme == .handwriting && !showsSymbols && !isInLocalMode
     if !writes && !handwriting.isHidden { handwriting.deactivate() }
@@ -7951,8 +8007,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       quickPunctuationWidth?.isActive = false
       globeWidthConstraint?.isActive = false
       bottomLanguageWidth?.isActive = false
-      actionGlobeButton.isHidden = !needsInputModeSwitchKey
-      if needsInputModeSwitchKey && style == .standard {
+      actionGlobeButton.isHidden = !layoutRequiresGlobeKey
+      if layoutRequiresGlobeKey && style == .standard {
         globeWidthConstraint = actionGlobeButton.widthAnchor.constraint(equalToConstant: 44)
         globeWidthConstraint?.isActive = true
       }
@@ -8089,7 +8145,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
             NSLayoutConstraint.activate(activeStyledActionWidths)
           } else if numberPad {
             // 系统要求额外地球键时仍保留其触控宽度；通常的手机数字页按网格对齐。
-            NSLayoutConstraint.activate(needsInputModeSwitchKey
+            NSLayoutConstraint.activate(layoutRequiresGlobeKey
               ? (hidesLanguage ? numberPadExpandedZeroWidths : numberPadActionWidths)
               : (hidesLanguage ? numberPadExpandedGridWidths : numberPadGridWidths))
           } else {
@@ -8169,7 +8225,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   /// 样式本身（连同「符」与「123」互换和数字键盘空格位置）排出的表，还没管中/英在哪一边。
   private func styleTableRow(style: ActionRowStyle, letterRows: Bool, letterGrid: Bool, numberPad: Bool,
                              nineKeyDigits: Bool, tallReturn: Bool, language: Bool) -> [TouchBottomRowLayout.Key]? {
-    let globe = needsInputModeSwitchKey
+    let globe = layoutRequiresGlobeKey
     let keyStyle = activeKeyLayoutStyle
     switch style {
     case .phone where letterRows && drawsChineseTwentySixKey
@@ -8255,7 +8311,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
 
   /// 借来的数字九宫格选了「空格在 0 左边」或「空格在右列」时的宽度约束，按空格位置、中/英显隐和地球键缓存。不带地球键时与上方五列对齐，与原来的数字页同一个规矩：返回与符号栏同宽、回车与右列同宽，0、空格、中/英里各占一列的键与数字键同宽，占两列的那个（`beforeZero` 隐藏中/英时的空格、`rightColumn` 的 0）不加约束、拿剩下的；带地球键时各键按 `TouchBottomRowLayout.borrowedNumberPad` 的份额相对返回键定宽。
   private func borrowedNumberPadWidths(space: TouchNumberPadSpace, hidesLanguage: Bool) -> [NSLayoutConstraint] {
-    let key = BorrowedNumberPadWidthsKey(space: space, hidesLanguage: hidesLanguage, globe: needsInputModeSwitchKey)
+    let key = BorrowedNumberPadWidthsKey(space: space, hidesLanguage: hidesLanguage, globe: layoutRequiresGlobeKey)
     if let cached = borrowedNumberPadWidthCache[key] { return cached }
     guard let toggle = layoutToggleButton, let enter = enterButton, let space0 = spaceButton,
           let language = bottomLanguageButton else { return [] }
@@ -10632,6 +10688,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   }
 
   override func viewDidLayoutSubviews() {
+    let layoutStarted = ProcessInfo.processInfo.systemUptime
     super.viewDidLayoutSubviews()
     // 键盘调整的外框按视图宽度算：第一次有了宽度、旋转、浮动与停靠切换，以及单手模式或分离式键盘让收窄失效时，在这里重新放一次（没变时什么也不做）。下面单手和缩进的计算读的是放好之后的宽度。
     applyKeyboardPlacement()
@@ -10648,7 +10705,13 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       appliedHintBandsLandscape = isLandscape
       updateLetterCaseControls()
     }
-    if let globe = actionGlobeButton, globe.isHidden != !needsInputModeSwitchKey {
+    // 进窗口后只核一次地球键的真值：`viewWillAppear` 时扩展可能还没连上宿主，那时读到的「不要」只是默认值，
+    // 不核就会把底行按错的值画出来。核完这一轮再读系统就只在首帧后那次兜底里，布局本身不再问。
+    if !reconciledGlobeKeyInWindow {
+      reconciledGlobeKeyInWindow = true
+      if resolveInputModeSwitchKey(trustingFalse: true) { updateKeyboardLayout() }
+    }
+    if let globe = actionGlobeButton, globe.isHidden != !layoutRequiresGlobeKey {
       updateKeyboardLayout()
     }
     updateSplitKeyboardIfNeeded()
@@ -10660,6 +10723,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     applyKeyboardPlacement()
     updatePreferredKeyboardHeight()
     updateKeyboardAdjustOverlay()
+    // 首帧之前可能来好几轮；取最后一轮，它才是首帧真正用的那次布局。
+    if !hasDrawnFirstFrame { firstLayoutMilliseconds = Self.elapsedMilliseconds(since: layoutStarted) }
   }
 
   private var showsPhoneLetterRows: Bool {

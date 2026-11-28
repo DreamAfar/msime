@@ -247,6 +247,10 @@ final class KeyboardMemoryTests: XCTestCase {
       XCTAssertTrue(timing[key] == "-" || timing[key].flatMap { UInt64($0) } != nil,
                     "keyboard_timing has \(key)=\(timing[key] ?? "nil")")
     }
+    // 首帧前那一段的分段：出现准备、窗口换装、布局都是毫秒数（没走到的记 0），整棵键盘的排布次数一定有。
+    for key in ["will_appear_ms", "window_skin_ms", "layout_ms", "layouts"] {
+      XCTAssertNotNil(timing[key].flatMap { UInt64($0) }, "keyboard_timing has no \(key): \(timing)")
+    }
   }
 
   /// 第一帧之前的内存警告只合并、不释放：那之前面板打不开，释义、翻译和候选画布的缓存都是空的，按键音还在加载，全量释放只会把首帧正要用的缓存清掉、再在首帧里建一遍。日志写明合并了几次，并且没有 `memory_released`。
