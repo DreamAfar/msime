@@ -57,6 +57,11 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private var deferredMemoryWarnings = 0
   /// 第一帧之前的内存警告只合并、不释放，最多等这么久；键盘被挡住、始终没出现时不能把扩展留在高占用上，过了这个窗口就回到原来的全量释放。
   nonisolated static let launchMemoryPressureWindow: TimeInterval = 2
+  /// 两次真的清引擎缓存之间至少隔这么久。系统连发警告时，前一次刚清完、候选马上重建，紧接着再清一遍没有收益。
+  nonisolated static let engineCacheResetWindow: TimeInterval = 0.5
+  /// 最近一次真的清了引擎缓存的时刻（`systemUptime`）。系统有时一二十毫秒内连着发几条内存警告，首帧刚画完那条和紧接着的
+  /// 下一条都落在同一段重建里：清了马上又被重建，等于清两次建两次。窗口内只真清一次，其余累加 `suppressed=`。
+  private var lastEngineCacheResetAt: TimeInterval = 0
   /// 主线程卡顿探针。键盘「已经显示出来，但按下去没反应」不在任何一段耗时里，只有主线程被占住才解释得通；它把卡住的时长和当时的阶段写进日志。
   private let mainThreadProbe = KeyboardMainThreadProbe()
   /// 第一帧的时刻（`systemUptime`）。首键、偏好重放、第一次空闲都以它为起点，设备上据此判断键盘显示之后还有多久在忙。
@@ -1093,6 +1098,10 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     mainThreadProbe.mark("build")
     DiagnosticLog.forwardHostLines()
     DiagnosticLog.shared.write("keyboard_loaded full_access=\(hasFullAccess ? 1 : 0) idiom=\(UIDevice.current.userInterfaceIdiom == .pad ? "pad" : "phone") base=\(DiagnosticLog.MemorySample.mebibytes(launchMemory.footprint)) session=\(DiagnosticLog.MemorySample.mebibytes(sessionMemory.footprint)) \(loadedMemory.fields)")
+    // 拆账起点：`launchMemory`（`base=`）是 `init` 里引擎还没准备时的占用，这里读的是会话已准备、界面还没建的这一刻。
+    // `phys`/`internal`/`compressed`/`resident` 分项用来分辨常驻是代码与框架的固定占用，还是可回收的堆与映射——
+    // 只在拆 57 MB 基线这段时间用，定论后可删。
+    DiagnosticLog.shared.write("memory_breakdown stage=keyboard_loaded \(loadedMemory.breakdownFields)")
     if session.initializationFailed { DiagnosticLog.shared.write("runtime_initialization_failed") }
     // 音标表在不在决定顶栏多不多留一行，第一帧之前就要知道。
     refreshPronunciationTable()
@@ -1141,6 +1150,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     NotificationCenter.default.addObserver(
       self, selector: #selector(noteSessionInBackground), name: .NSExtensionHostDidEnterBackground, object: nil)
     DiagnosticLog.shared.write("keyboard_built \(DiagnosticLog.MemorySample.current().fields)")
+    DiagnosticLog.shared.write("memory_breakdown stage=keyboard_built \(DiagnosticLog.MemorySample.current().breakdownFields)")
     builtMilliseconds = Self.elapsedMilliseconds(since: loadStartedAt)
   }
 
@@ -1448,8 +1458,16 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       engineCache = "deferred"
     } else {
       engineCacheResetPending = false
-      _ = session.resetCache()
-      engineCache = "reset"
+      let now = ProcessInfo.processInfo.systemUptime
+      // 同一段重建里的连续警告只清一次：引擎清缓存后候选马上会为下一次输入重建，几十毫秒内再清一遍省不下内存、
+      // 反而多一次跨输入线程的清空与重建。窗口内只记不动作。
+      if now - lastEngineCacheResetAt >= Self.engineCacheResetWindow {
+        _ = session.resetCache()
+        lastEngineCacheResetAt = now
+        engineCache = "reset"
+      } else {
+        engineCache = "suppressed"
+      }
     }
     ResolvedTheme.clearCacheForMemoryPressure()
     candidateCanvasEpoch &+= 1
@@ -1491,6 +1509,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     candidateTargetGlosses = [:]
     translations.clearCacheForMemoryPressure()
     DiagnosticLog.shared.write("caches_released reason=\(reason) before=\(before) \(DiagnosticLog.MemorySample.current().fields) \(memoryParts)")
+    DiagnosticLog.shared.write("memory_breakdown stage=caches_released \(DiagnosticLog.MemorySample.current().breakdownFields)")
   }
 
   /// `diagnostic_log.server` 开着时让诊断日志写到共享目录，关掉后停写；隐私模式和凭据输入框里同样停写（`KeyboardPrivacyGate` 的 `diagnosticLog`）。
@@ -1648,6 +1667,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     finishTemporaryEnglish(force: true)
     // 收起前的占用也记下来：与下一次 `focus_in` 相减就能看出这个进程在两次出现之间留下了多少（常驻越高越容易被系统结束）。
     DiagnosticLog.shared.write("focus_out \(DiagnosticLog.MemorySample.current().fields) \(memoryParts)")
+    DiagnosticLog.shared.write("memory_breakdown stage=focus_out \(DiagnosticLog.MemorySample.current().breakdownFields)")
     KeyboardUsageReporting.dismissed()
     replyModel.setText("")
     // 回复面板是工具，键盘收起时跟其他面板一起关掉，下次出现回到原来的键盘。
@@ -1678,6 +1698,11 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     // prepareForDeactivation: for the same reason: the user typed those letters and never asked to
     // throw them away.
     render(session.finishComposition())
+    // 收起时引擎侧可能还留着词图与候选缓存（`reset_cache` 只在内存警告里被调用过），这些下次出现未必复用、
+    // 却要陪进程常驻到被系统结束。趁会话还没放掉先清一次，让常驻基线里的可回收页真正释放。
+    if !session.dictionarySessionSuspended {
+      _ = session.resetCache()
+    }
     releaseDictionarySession()
     endLockActivityIfReleased()
     ownEditEcho.reset()

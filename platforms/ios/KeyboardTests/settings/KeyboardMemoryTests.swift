@@ -122,6 +122,17 @@ final class KeyboardMemoryTests: XCTestCase {
     XCTAssertGreaterThan(DiagnosticLog.MemorySample.current().footprint, 0)
   }
 
+  /// 拆账行的四项分项都是 MiB 取整，且默认值不破坏现有的两参构造（拆账行只在真机读全，模拟器上这些值是 0）。
+  func testBreakdownFieldsAreWholeMebibytes() {
+    let sample = DiagnosticLog.MemorySample(footprint: 41 * 1024 * 1024 + 1023, available: 0,
+                                            internalBytes: 3 * 1024 * 1024, compressedBytes: 1024 * 1024 - 1,
+                                            residentBytes: 50 * 1024 * 1024)
+    XCTAssertEqual(sample.breakdownFields, "phys=41 internal=3 compressed=0 resident=50")
+    // 两参构造仍可用，新增分项默认 0，不破坏 `fields` 与既有测试。
+    XCTAssertEqual(DiagnosticLog.MemorySample(footprint: 0, available: 0).breakdownFields,
+                   "phys=0 internal=0 compressed=0 resident=0")
+  }
+
   /// 最长的那一行在数字最大时也不会被 192 字节截掉，并且仍是可打印 ASCII。
   func testTheLongestMemoryLineFitsTheRecord() {
     let huge = DiagnosticLog.MemorySample(footprint: .max, available: .max)
@@ -207,6 +218,20 @@ final class KeyboardMemoryTests: XCTestCase {
   }
 
   // MARK: - 启动占用
+
+  /// 连续两条内存警告落在去重窗口内时，引擎缓存只真清一次：第一条 `engine_cache=reset`，第二条 `engine_cache=suppressed`。两次之间不插入其它操作，间隔远小于半秒窗口。
+  func testConsecutiveWarningsResetTheEngineCacheOnce() throws {
+    let lines = try withSharedLog {
+      let controller = composingKeyboard()
+      controller.didReceiveMemoryWarning()
+      controller.didReceiveMemoryWarning()
+      controller.viewWillDisappear(false)
+    }
+    let released = lines.filter { $0.contains("] memory_released ") }
+    XCTAssertEqual(released.count, 2, "\(lines)")
+    XCTAssertTrue(released[0].contains(" engine_cache=reset "), "\(released)")
+    XCTAssertTrue(released[1].contains(" engine_cache=suppressed "), "\(released)")
+  }
 
   /// 按键盘自己写进诊断日志的读数，量出启动各阶段的 `phys_footprint`：引擎会话（`base` → `session`）、其余存储属性（→ `keyboard_loaded` 的 `mem`）、建界面（→ `keyboard_built`）、按屏幕宽度画出第一帧（→ `keyboard_shown`）。
   ///

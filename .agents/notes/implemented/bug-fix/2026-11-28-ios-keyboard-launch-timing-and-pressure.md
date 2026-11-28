@@ -42,6 +42,12 @@ Status: implemented
 - **超长记录不再静默截断。** 新增 `DiagnosticLog.recordBody`：正文超过 `maxEventBytes` 时截到上限再补 ` ~truncated`，`write` 改用它。`sanitize` 的可打印 ASCII 约束与 192 字节上限都没变——那是「调用点写错也不会把输入内容带进文件」的安全边界——只是被截掉时留个痕迹。
 - **阶段与分段各占一行，并把那个大段再拆开。** `keyboard_timing` 只留 `prepare_ms`、`built_ms`、`first_frame_ms`、`will_appear_ms`、`resume_ms`、`deferred_warnings`；`keyboard_phases` 单独记 `window_skin_ms`、`layout_ms`、`layout_total_ms`、`layouts`；`keyboard_spans` 单独记分段。分段本身也拆细了：第一段 `enter` 从 `viewDidLoad` 结束那一刻起算，量的是 UIKit 建完界面到把这次出现交回来（含 `super`）的时间；`synchronizeInputContext` 之后单记一段 `context`，因为它要跨进程读宿主输入框；原来那一大段 `sync` 改名 `prefsync`，只覆盖那一串偏好同步。
 
+第五版（拆账与释放）在设备日志确认 `enter` 是首帧前唯一的大头（309–702 ms，且 `main_stall` 停在 `build` 阶段说明主线程被 UIKit 装配控制器连续占用）之后补上：
+
+- **拆账内存分项。** `DiagnosticLog.MemorySample` 增加 `internalBytes`、`compressedBytes`、`residentBytes` 三个分项，新增 `breakdownFields`（`phys=`/`internal=`/`compressed=`/`resident=`，MiB 取整）。`keyboard_loaded`、`keyboard_built`、`focus_out`、`caches_released` 四处各写一行 `memory_breakdown stage=…`。`base=57 MB` 到底是代码与框架的固定占用、还是可回收的堆与映射，靠这四项分辨——只在拆 57 MB 基线这段时间用，定论后可删。
+- **收起时真的清引擎缓存。** `viewWillDisappear` 里、`render(session.finishComposition())` 之后、`releaseDictionarySession()` 之前补一次 `session.resetCache()`（仅当会话还没挂起）。此前 `reset_cache` 只在内存警告里被调用，收起后引擎的词图与候选缓存陪着进程常驻到被系统结束；`caches_released reason=dismiss before=60 mem=60` 已经说明现有释放几乎放不出东西。
+- **连续内存警告只真清一次引擎缓存。** 新增 `lastEngineCacheResetAt` 与 `engineCacheResetWindow`（0.5 s）：非组字的警告里，距上一次真清不到半秒的只记 `engine_cache=suppressed`、不跨输入线程再清一遍。系统有时一二十毫秒内连发几条警告，首帧刚画完那条和紧接着的下一条都落在同一段重建里，清了马上又被重建，等于清两次建两次。
+
 ## Alternatives considered
 
 - **照 Android #10175 的做法，把建会话整个排到第一帧之后** — 那是这次真正想要的形状，但 iOS 上做不到同样小。`KeyboardViewController` 里有近 270 行直接引用 `session.`，而且首帧要用的偏好文档正是 `msimeClientPrepareHost` 的返回值：把准备推迟，`viewDidLoad` 就只能按 App Group 镜像或默认值画，方案、皮肤、候选配色会先错一遍再被重画，正好是 #11830 报告的那种闪烁和跳动。要做需要先把「只要偏好」拆成 `msimeClientLoadPreferences`（不需要会话句柄）的轻量快照，再逐个换掉 `viewDidLoad` 里的会话依赖，单独立项、单独验证。
@@ -63,7 +69,7 @@ Status: implemented
 
 ## Consequences
 
-- **收益**：启动时间被拆成准备运行时、建界面、第一帧、重建会话四段，设备上可以直接看出该减哪一块；第一帧之前的 149 次全量释放变成一行日志，省掉重复的主题解析、候选外观重算和跨输入线程清缓存；按键音不再在启动阶段被反复释放重载（同一份日志里 47 次唤起重载了 39 次）。首帧之后再也不用为一份没变的文档跑那一串同步与外观重算，`main_stall`/`first_frame_idle`/`first_key` 能把「显示出来但点不动」定位到具体阶段；收起与后台不再带着释义译文和已解码的按键音常驻，后台被 jetsam 结束的概率随之下降。首帧前那 343–375 ms 现在拆成出现准备、窗口换装、布局三段，`layouts=` 能直接看出整棵键盘排了几遍；同一个进程里第二次唤起不必再为地球键多排一遍，底行首帧前就按对的值画出来，布局里也不再反复向输入系统查询这个值。第三版把 `viewWillAppear` 里的 153 ms 再拆成八段、把十遍布局的累计耗时单列，并让每一遍布局结束时记下自己用的输入：直接调用之后紧跟一次 `updateKeyboardLayoutIfNeeded` 的那类重复重排不再发生。第四版把这一行按 192 字节上限拆成三行，分段不会再被截掉，并把原本那一段 `sync` 再分成 `enter`、`context`、`prefsync`——真机上九遍布局合计只有 8 ms，布局这条线可以就此排除。
+- **收益**：启动时间被拆成准备运行时、建界面、第一帧、重建会话四段，设备上可以直接看出该减哪一块；第一帧之前的 149 次全量释放变成一行日志，省掉重复的主题解析、候选外观重算和跨输入线程清缓存；按键音不再在启动阶段被反复释放重载（同一份日志里 47 次唤起重载了 39 次）。首帧之后再也不用为一份没变的文档跑那一串同步与外观重算，`main_stall`/`first_frame_idle`/`first_key` 能把「显示出来但点不动」定位到具体阶段；收起与后台不再带着释义译文和已解码的按键音常驻，后台被 jetsam 结束的概率随之下降。首帧前那 343–375 ms 现在拆成出现准备、窗口换装、布局三段，`layouts=` 能直接看出整棵键盘排了几遍；同一个进程里第二次唤起不必再为地球键多排一遍，底行首帧前就按对的值画出来，布局里也不再反复向输入系统查询这个值。第三版把 `viewWillAppear` 里的 153 ms 再拆成八段、把十遍布局的累计耗时单列，并让每一遍布局结束时记下自己用的输入：直接调用之后紧跟一次 `updateKeyboardLayoutIfNeeded` 的那类重复重排不再发生。第四版把这一行按 192 字节上限拆成三行，分段不会再被截掉，并把原本那一段 `sync` 再分成 `enter`、`context`、`prefsync`——真机上九遍布局合计只有 8 ms，布局这条线可以就此排除。第五版把常驻基线拆成物理占用、可回收匿名页、压缩页与驻留集四项，收起时真正清掉引擎的候选与词图缓存，并把系统连发警告时的引擎清缓存去重：下一份日志能直接看出 57 MB 基线归谁、收起后常驻降了多少、启动期那次重复 `engine_cache=reset` 是否消失。
 - **代价**：诊断日志开着时多一个每 40 ms 敲主队列的后台定时器（只比时间戳，不采样、不建视图）；收起后第一次打字前按键音要重新加载，最坏头几个键退回系统按键声；后台放掉释义与译文后，回前台第一次出候选要重新取一遍，联网翻译会多一次请求。
 - **重访信号（首帧后）**：真机日志里若 `main_stall` 集中在 `preferences` 阶段，说明文档确实每次都在变，下一步要查是谁在写；若集中在 `appearance`，说明整树换装仍需削减。`preferences_unchanged` 与 `preferences_applied` 的比例能直接说明去重省掉了多少轮。`caches_released` 前后内存差很小，说明常驻大头不在这些纯缓存上，得转向引擎会话与视图本身。
 - **重访信号（启动）**：真机日志里 `keyboard_timing` 的 `prepare_ms` 若明显大于 `built_ms` 与 `first_frame_ms` 之和，下一步该做的是把准备运行时挪出首帧（即上面被否决的那条，需要先拆偏好读取）；若 `deferred_warnings` 很大而 `first_frame_ms` 仍不动，说明瓶颈不在内存压力，回到建界面与布局。
@@ -80,4 +86,6 @@ Status: implemented
 - 新增 `KeyboardStallDetectorTests`：短于阈值不报、超时只报一次下界、恢复时明显更长才补准确值、后台没赶上时由主线程记、相差不到 100 ms 不重复写、上一拍还挂着时不再投。
 - `testKeyboardLaunchFootprintIsLoggedPerStage` 追加 `will_appear_ms`、`window_skin_ms`、`layout_ms`、`layouts` 四个字段的数字校验：前三个没走到的段记 0，不写 `-`，这样「没发生」和「没记」在设备日志里分得开。第三版再加 `layout_total_ms` 的数字校验，并把 `will_spans` 按逗号拆开、逐段校验 `名字:毫秒数`，保证这一行在字段之间只用空格分隔的日志里不会被拆成别的字段。第四版随字段拆行调整：`keyboard_timing` 校验 `built_ms`、`first_frame_ms`、`will_appear_ms`，`keyboard_phases` 校验四个阶段字段，`keyboard_spans` 取整行按逗号逐段校验。
 - 新增 `testOverlongRecordsMarkTheTruncation`：500 字节的记录仍截到 `maxEventBytes`，但末尾是 ` ~truncated`；短记录原样通过。
-- 未验证：没有真机数据。模拟器不给 `avail`、也不设扩展上限，`deferred_warnings` 与两秒窗口的实际效果只能在设备上确认；首帧之前不清缓存对 jetsam 的影响同样需要真机复测。`main_stall`、`first_frame_idle`、`first_key`、`caches_released` 这几行是这次加在设备上的读数，本轮既没有真机日志，也没有模拟器上的卡顿复现，只能确认它们不改变现有用例的断言。
+- 新增 `testBreakdownFieldsAreWholeMebibytes`：`breakdownFields` 四项都是 MiB 取整，且新增分项默认 0、不破坏既有的两参构造与 `fields`。
+- 新增 `testConsecutiveWarningsResetTheEngineCacheOnce`：连续两条内存警告（中间不插操作）落在去重窗口内，日志里第一条 `engine_cache=reset`、第二条 `engine_cache=suppressed`。
+- 未验证：没有真机数据。模拟器不给 `avail`、也不设扩展上限，`deferred_warnings` 与两秒窗口的实际效果只能在设备上确认；首帧之前不清缓存对 jetsam 的影响同样需要真机复测。`main_stall`、`first_frame_idle`、`first_key`、`caches_released`、`memory_breakdown` 这几行是这次加在设备上的读数，本轮既没有真机日志，也没有模拟器上的卡顿复现，只能确认它们不改变现有用例的断言；`internal`/`compressed`/`resident` 三个分项在模拟器上的值没有参考意义，拆账结论要等真机。

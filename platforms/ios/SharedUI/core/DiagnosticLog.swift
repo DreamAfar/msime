@@ -161,6 +161,18 @@ extension DiagnosticLog {
   struct MemorySample: Equatable {
     let footprint: UInt64
     let available: UInt64
+    let internalBytes: UInt64
+    let compressedBytes: UInt64
+    let residentBytes: UInt64
+
+    init(footprint: UInt64, available: UInt64,
+         internalBytes: UInt64 = 0, compressedBytes: UInt64 = 0, residentBytes: UInt64 = 0) {
+      self.footprint = footprint
+      self.available = available
+      self.internalBytes = internalBytes
+      self.compressedBytes = compressedBytes
+      self.residentBytes = residentBytes
+    }
 
     static func current() -> MemorySample {
       var info = task_vm_info_data_t()
@@ -171,7 +183,10 @@ extension DiagnosticLog {
         }
       }
       return MemorySample(footprint: result == KERN_SUCCESS ? info.phys_footprint : 0,
-                          available: UInt64(os_proc_available_memory()))
+                          available: UInt64(os_proc_available_memory()),
+                          internalBytes: result == KERN_SUCCESS ? info.internal : 0,
+                          compressedBytes: result == KERN_SUCCESS ? info.compressed : 0,
+                          residentBytes: result == KERN_SUCCESS ? info.resident_size : 0)
     }
 
     /// 字节数向下取整到 MiB。
@@ -179,5 +194,8 @@ extension DiagnosticLog {
 
     /// `mem=<MiB> avail=<MiB>`，日志行里的固定写法；系统没给出余量（`available` 为 0）时写 `avail=-`。
     var fields: String { "mem=\(Self.mebibytes(footprint)) avail=\(available == 0 ? "-" : String(Self.mebibytes(available)))" }
+
+    /// 拆账用的分项读数：`phys=` 是物理占用（与 `mem=` 同源），`internal=` 是可回收的匿名页，`compressed=` 是已压缩页，`resident=` 是驻留集。常驻 57 MB 到底是代码与框架的固定占用、还是可回收的堆/映射，靠这几项分辨。
+    var breakdownFields: String { "phys=\(Self.mebibytes(footprint)) internal=\(Self.mebibytes(internalBytes)) compressed=\(Self.mebibytes(compressedBytes)) resident=\(Self.mebibytes(residentBytes))" }
   }
 }
